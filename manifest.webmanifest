@@ -1,0 +1,1 @@
+{"name":"Inventario físico · Pruebas","short_name":"Inventario TEST","description":"Entorno cloud aislado para validar el inventario físico","lang":"es","start_url":"./","scope":"./","display":"standalone","background_color":"#f5f5f0","theme_color":"#173c30","icons":[{"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
