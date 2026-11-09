@@ -1,41 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="466" height="320" viewBox="0 0 466 320" fill="none" role="img" aria-labelledby="title desc"><title id="title">MARI · Propuesta 05</title><desc id="desc">Tres cajas rellenas y cinco marcas de conteo dentro de esquinas turquesa. MARI en letras magenta gruesas y redondeadas. Adaptación vectorial de la propuesta 05 seleccionada.</desc><defs>
-  <linearGradient id="coralLeft" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FF6C77"/><stop offset="1" stop-color="#F84C65"/></linearGradient>
-  <linearGradient id="coralRight" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FC6372"/><stop offset="1" stop-color="#FF5066"/></linearGradient>
-  <linearGradient id="pinkLeft" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#DC005B"/><stop offset="1" stop-color="#CD0058"/></linearGradient>
-  <linearGradient id="pinkRight" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#D8005D"/><stop offset="1" stop-color="#C50052"/></linearGradient>
-  <linearGradient id="word" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#C60055"/><stop offset=".5" stop-color="#D0005A"/><stop offset="1" stop-color="#C90055"/></linearGradient>
-  <linearGradient id="scan" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#00B8B1"/><stop offset=".5" stop-color="#0BC6BE"/><stop offset="1" stop-color="#00B6AF"/></linearGradient>
-</defs><g id="scanner" fill="none" stroke="url(#scan)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M26 50V30Q26 23 33 23H63"/>
-  <path d="M404 23H434Q441 23 441 30V50"/>
-  <path d="M26 138V158Q26 165 33 165H63"/>
-  <path d="M404 165H434Q441 165 441 158V138"/>
-</g>
-<g id="inventory-boxes"><g transform="translate(45 51)">
-    <path d="M3 25 47 0 91 25 47 50Z" stroke="#FA5E70" stroke-width="5" stroke-linejoin="round"/>
-    <path d="M24 37 67 12" stroke="#FA5E70" stroke-width="5"/>
-    <path d="M0 29 43.5 53.5V95.5L0 69Z" fill="url(#coralLeft)"/>
-    <path d="M50 53.5 94 29V69L50 95.5Z" fill="url(#coralRight)"/>
-  </g><g transform="translate(148 51)">
-    <path d="M3 25 47 0 91 25 47 50Z" stroke="#D30059" stroke-width="5" stroke-linejoin="round"/>
-    <path d="M24 37 67 12" stroke="#D30059" stroke-width="5"/>
-    <path d="M0 29 43.5 53.5V95.5L0 69Z" fill="url(#pinkLeft)"/>
-    <path d="M50 53.5 94 29V69L50 95.5Z" fill="url(#pinkRight)"/>
-  </g><g transform="translate(251 51)">
-    <path d="M3 25 47 0 91 25 47 50Z" stroke="#FA5E70" stroke-width="5" stroke-linejoin="round"/>
-    <path d="M24 37 67 12" stroke="#FA5E70" stroke-width="5"/>
-    <path d="M0 29 43.5 53.5V95.5L0 69Z" fill="url(#coralLeft)"/>
-    <path d="M50 53.5 94 29V69L50 95.5Z" fill="url(#coralRight)"/>
-  </g></g>
-<g id="five-counts" fill="#730B48">
-  <rect x="360" y="61" width="7.5" height="77" rx="2.2"/>
-  <rect x="378" y="60" width="7.5" height="77" rx="2.2"/>
-  <rect x="396" y="58" width="7.5" height="78" rx="2.2"/>
-  <rect x="414" y="57" width="7.5" height="78" rx="2.2"/>
-  <path d="M350 114 425 73 430 84 354 125Z"/>
-</g><g id="mari-lettering" fill="url(#word)">
-  <path d="M20 292V198Q20 191 27 191H47Q51 191 54 195L85 235 117 195Q120 191 125 191H144Q151 191 151 198V292Q151 299 144 299H124Q117 299 117 292V244L97 270Q92 277 85 277Q78 277 73 270L54 245V292Q54 299 47 299H27Q20 299 20 292Z"/>
-  <path fill-rule="evenodd" d="M157 293 201 195Q203 191 209 191H227Q233 191 235 195L279 293Q282 299 275 299H251Q246 299 244 294L238 280H198L192 294Q190 299 185 299H162Q154 299 157 293ZM209 253H228L218.5 229Z"/>
-  <path fill-rule="evenodd" d="M293 292V198Q293 191 300 191H349C380 191 397 205 397 230C397 248 387 259 374 265L399 292Q405 299 396 299H367Q362 299 359 295L336 269H326V292Q326 299 319 299H300Q293 299 293 292ZM326 219V242H347Q363 242 363 230.5Q363 219 347 219Z"/>
-  <rect x="415" y="191" width="32" height="108" rx="6"/>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="268" height="58" viewBox="0 0 268 58" fill="none" role="img" aria-labelledby="title desc">
+<title id="title">MARI</title><desc id="desc">Logo horizontal de Mari: cajas y marcas de inventario enmarcadas en turquesa, con lettering MARI en ciruela y magenta.</desc>
+<g stroke="#08BDA9" stroke-width="3.2" stroke-linecap="round"><path d="M4 14V6Q4 3 7 3H16M68 3H77Q80 3 80 6V14M4 43V51Q4 54 7 54H16M68 54H77Q80 54 80 51V43"/></g>
+<g stroke-width="1.6" stroke-linejoin="round">
+<g transform="translate(9 17)" stroke="#F06470"><path d="M0 6 7 2 14 6 7 10Z"/><path d="M0 6v9l7 4v-9M14 6v9l-7 4" fill="#F06470"/><path d="m3 8 7-4"/></g>
+<g transform="translate(26 17)" stroke="#D9155A"><path d="M0 6 7 2 14 6 7 10Z"/><path d="M0 6v9l7 4v-9M14 6v9l-7 4" fill="#D9155A"/><path d="m3 8 7-4"/></g>
+<g transform="translate(43 17)" stroke="#F06470"><path d="M0 6 7 2 14 6 7 10Z"/><path d="M0 6v9l7 4v-9M14 6v9l-7 4" fill="#F06470"/><path d="m3 8 7-4"/></g></g>
+<g stroke="#62123F" stroke-width="2.8" stroke-linecap="square"><path d="M62 20v17M67 20v17M72 20v17M77 20v17M60 36l18-14"/></g>
+<g fill="#51253E"><path d="M98 45V13h9l14 17 14-17h9v32h-9V26l-10 12h-8l-10-12v19Z"/><path fill-rule="evenodd" d="m147 45 12-32h12l12 32h-9l-2-7h-14l-2 7Zm13-14h10l-5-12Z"/><path fill-rule="evenodd" d="M187 45V13h18q11 0 11 10 0 7-7 9l9 13h-11l-8-12h-4v12Zm8-24v6h9q4 0 4-3t-4-3Z"/><path d="M221 13h9v32h-9Z"/></g><path d="M221 6h9" stroke="#D9155A" stroke-width="4" stroke-linecap="round"/>
+</svg>
