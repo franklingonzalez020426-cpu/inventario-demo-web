@@ -70,6 +70,10 @@
 .login-photo-placeholder{position:relative;overflow:hidden;min-height:0;padding:0;background:#e5e9e2;isolation:isolate}
 .login-photo{position:absolute;inset:0;z-index:0;width:100%;height:100%;display:block;object-fit:cover;object-position:center 52%}
 @media(max-width:1000px){.login-photo-placeholder{min-height:0;padding:0}}
+
+/* Mobile photo area: preserve the green wave and give the golf photo a proper frame. */
+@media(max-width:1000px){.login-hero{height:370px;grid-template-rows:150px 220px}.login-hero-green{padding-bottom:42px}.login-photo-placeholder{min-height:0;padding:0}.login-photo{object-position:center 55%}}
+@media(max-width:420px){.login-hero{height:360px;grid-template-rows:145px 215px}.login-hero-green{padding-bottom:38px}}
 </style><script>'use strict'; window.INVENTORY_CLOUD={url:'https://dybdaadrosstijjflsfi.supabase.co',publishableKey:'sb_publishable_Y7sIGqp9_PBgaAbwkdH9CA_nFW2UxN1',functionName:'inventory-gateway'}; window.INVENTORY_DEVELOPMENT=true;</script><script>
 /**
  * Minified by jsDelivr using Terser v5.37.0.
