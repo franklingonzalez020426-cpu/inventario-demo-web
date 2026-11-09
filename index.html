@@ -18,14 +18,14 @@
 .login-hero-green{position:relative;isolation:isolate;background:#006D46;color:#fff;padding:42px clamp(28px,5.2vw,76px) 82px;display:flex;flex-direction:column;justify-content:space-between}
 .login-wordmark{font-size:1.12rem;font-weight:700;letter-spacing:.02em;color:#fff}
 .login-hero-copy{position:relative;z-index:1}.login-hero-copy .eyebrow{color:#E4D9B6;margin-bottom:14px}.login-hero-copy h1{font-size:clamp(3rem,5.2vw,4.7rem);line-height:1.02;letter-spacing:-.055em;margin:0 0 14px}.login-hero-copy p{color:#F0F4F0;font-size:1rem;line-height:1.65;margin:0;max-width:360px}
-.login-wave{position:absolute;z-index:0;left:0;right:0;bottom:-1px;width:100%;height:100px;display:block}
+
 .login-photo-placeholder{min-height:220px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;padding:20px;text-align:center;color:#626B63;background:linear-gradient(145deg,#E5E9E2,#F0F1EB)}
 .login-photo-icon{width:48px;height:36px;border:1px solid #AEB8AC;border-radius:5px;position:relative;opacity:.75}.login-photo-icon:before{content:"";position:absolute;left:7px;bottom:6px;width:31px;height:20px;border-left:1px solid #7C8A7B;border-top:1px solid #7C8A7B;transform:skewY(-30deg) rotate(-7deg)}.login-photo-icon:after{content:"";position:absolute;right:8px;top:7px;width:5px;height:5px;border:1px solid #7C8A7B;border-radius:50%}.login-photo-placeholder>span:not(.login-photo-icon){font-size:.83rem;font-weight:650}.login-photo-placeholder small{font-size:.73rem;color:#778176}
 .login-main{background:#F5F5F0;padding:40px;place-items:center}.login-form{max-width:420px}.club-logo{display:block;width:96px;height:auto;max-height:118px;object-fit:contain;object-position:left center;margin:0 0 18px}.login-form>.eyebrow{color:#006D46}.login-form h2{color:#303A35}.login-form .button.primary{color:#fff}
-@media(max-width:1000px){.login{grid-template-columns:1fr}.login-hero{min-height:0;height:280px;grid-template-rows:170px 110px}.login-hero-green{padding:17px 23px 48px}.login-wordmark{font-size:1rem}.login-hero-copy .eyebrow{font-size:.62rem;margin-bottom:7px}.login-hero-copy h1{font-size:2rem;margin:0 0 5px}.login-hero-copy p{font-size:.78rem;line-height:1.35}.login-wave{height:54px}.login-photo-placeholder{min-height:0;padding:12px;gap:5px}.login-photo-icon{width:36px;height:27px}.login-photo-icon:before{width:24px;height:14px}.login-photo-icon:after{width:4px;height:4px;right:6px;top:5px}.login-photo-placeholder>span:not(.login-photo-icon){font-size:.72rem}.login-photo-placeholder small{font-size:.66rem}.login-main{padding:25px 22px 34px;place-items:start center}.login-form{max-width:480px}.club-logo{width:72px;max-height:88px;margin-bottom:12px}.login-form>p{margin-bottom:22px}.login-form .footnote{margin-top:18px}}
-@media(max-width:420px){.login-hero{height:254px;grid-template-rows:155px 99px}.login-hero-green{padding:15px 20px 42px}.login-wave{height:47px}.login-main{padding:22px 20px 30px}.login-form h2{font-size:1.48rem}.login-form>p{font-size:.84rem;margin-bottom:18px}}
+@media(max-width:1000px){.login{grid-template-columns:1fr}.login-hero{min-height:0;height:280px;grid-template-rows:170px 110px}.login-hero-green{padding:17px 23px 48px}.login-wordmark{font-size:1rem}.login-hero-copy .eyebrow{font-size:.62rem;margin-bottom:7px}.login-hero-copy h1{font-size:2rem;margin:0 0 5px}.login-hero-copy p{font-size:.78rem;line-height:1.35}.login-photo-placeholder{min-height:0;padding:12px;gap:5px}.login-photo-icon{width:36px;height:27px}.login-photo-icon:before{width:24px;height:14px}.login-photo-icon:after{width:4px;height:4px;right:6px;top:5px}.login-photo-placeholder>span:not(.login-photo-icon){font-size:.72rem}.login-photo-placeholder small{font-size:.66rem}.login-main{padding:25px 22px 34px;place-items:start center}.login-form{max-width:480px}.club-logo{width:72px;max-height:88px;margin-bottom:12px}.login-form>p{margin-bottom:22px}.login-form .footnote{margin-top:18px}}
+@media(max-width:420px){.login-hero{height:254px;grid-template-rows:155px 99px}.login-hero-green{padding:15px 20px 42px}.login-main{padding:22px 20px 30px}.login-form h2{font-size:1.48rem}.login-form>p{font-size:.84rem;margin-bottom:18px}}
 /* Curved boundary between the brand panel and the future photograph */
-.login-hero-green{background:transparent}.login-wave{inset:0;width:100%;height:100%;bottom:auto}.login-wave path{}
+.login-hero-green{background:transparent}
 .login-wordmark,.login-hero-copy{position:relative;z-index:1}
 #toast:empty{display:none}
 
@@ -34,8 +34,38 @@
 
 
 
-.login-wave{top:-5%;left:-6%;right:auto;bottom:auto;width:112%;height:112%;transform-origin:50% 50%;animation:mari-login-wave 5.6s ease-in-out infinite alternate;will-change:transform}
-@keyframes mari-login-wave{0%{transform:translate3d(-7px,2px,0) scaleY(.96)}50%{transform:translate3d(3px,-3px,0) scaleY(1.04)}100%{transform:translate3d(7px,2px,0) scaleY(.96)}}
+
+
+
+.login-wave {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.login-wave-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 100%;
+  animation: mari-wave-flow 7s linear infinite;
+}
+
+.login-wave-front { color: #006D46; }
+.login-wave-back {
+  top: 4%;
+  color: #28845F;
+  animation-duration: 11s;
+  animation-delay: -4s;
+}
+
+@keyframes mari-wave-flow {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
 </style><script>'use strict'; window.INVENTORY_CLOUD={url:'https://dybdaadrosstijjflsfi.supabase.co',publishableKey:'sb_publishable_Y7sIGqp9_PBgaAbwkdH9CA_nFW2UxN1',functionName:'inventory-gateway'}; window.INVENTORY_DEVELOPMENT=true;</script><script>
 /**
  * Minified by jsDelivr using Terser v5.37.0.
@@ -410,7 +440,7 @@ async function renderLogin(){
  const passwordHtml=firstSetup?(ownerVerified?'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256"></div></div>':''):'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="256"></div></div>';
  const actionHtml=serverUnknown?'':'<button id="login-submit" class="button primary" type="submit">Entrar al inventario →</button>'+(firstSetup&&!ownerVerified?'<button id="owner-verify" class="button primary" type="button" data-action="send-owner-activation" hidden>Verificar cuenta propietaria →</button>':'');
  const offlineHtml=offlineSession?'<div class="offline-resume">'+button('Continuar como '+esc(offlineSession.user.name),'resume','','')+'<p class="small muted" style="margin-top:10px">Continúa con el catálogo descargado y los registros pendientes de este dispositivo.</p></div>':'';
- $('#app').innerHTML='<div class="login"><section class="login-hero" aria-label="Identidad del Club de Golf de Panamá"><div class="login-hero-green"><div class="brand login-wordmark">Mari</div><div class="login-hero-copy"><div class="eyebrow">Control físico mensual</div><h1>Mari</h1><p>Inventario físico<br>Club de Golf de Panamá</p></div><svg class="login-wave" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0H1000V84C870 86 806 93 680 91C540 89 488 85 354 89C215 95 126 95 0 90Z" fill="#006D46"></path></svg></div><div class="login-photo-placeholder" aria-label="Espacio reservado para la fotografía institucional"><span class="login-photo-icon" aria-hidden="true"></span><span>Fotografía del Club</span><small>Espacio reservado</small></div></section><main class="login-main"><div class="login-form"><img class="club-logo" src="./logo-cgp-formal.svg" alt="Club de Golf de Panamá"><div class="eyebrow">Club de Golf de Panamá</div><p><span class="badge '+(state.offlineReady?'green':'amber')+'">'+(state.offlineReady?'Offline listo':'Offline no preparado')+'</span></p><h2>'+(serverUnknown?'Servidor no disponible':firstSetup?'Acceso a Mari':'Acceso a Mari')+'</h2><p>'+status+'</p><form id="login-form"'+(serverUnknown?' hidden':'')+'>'+roleHtml+'<div class="field"><label for="login-name">Tu nombre</label><input id="login-name" name="name" autocomplete="name" required maxlength="80" placeholder="Nombre y apellidos" value="'+esc(activationName)+'"></div>'+passwordHtml+actionHtml+'</form>'+(serverUnknown?'<button class="button primary" type="button" data-action="reload">Reintentar conexión →</button>':'')+offlineHtml+'<p class="footnote">'+(serverUnknown?'Vuelva a intentar cuando haya conexión. No se han eliminado los datos de este navegador.':firstSetup?'El acceso de contador no requiere código ni autorización individual. La administración se activa con la cuenta propietaria verificada.':'Los contadores ingresan con su nombre; este no otorga permisos administrativos.')+' Mantén este navegador para conservar la sesión y sincronizar registros pendientes.</p></div></main></div>';
+ $('#app').innerHTML='<div class="login"><section class="login-hero" aria-label="Identidad del Club de Golf de Panamá"><div class="login-hero-green"><div class="brand login-wordmark">Mari</div><div class="login-hero-copy"><div class="eyebrow">Control físico mensual</div><h1>Mari</h1><p>Inventario físico<br>Club de Golf de Panamá</p></div><div class="login-wave" aria-hidden="true"><svg class="login-wave-layer login-wave-back" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V89C125 89 125 95 250 95S375 89 500 89S625 82 750 82S875 89 1000 89S1125 95 1250 95S1375 89 1500 89S1625 82 1750 82S1875 89 2000 89V0Z"></path></svg><svg class="login-wave-layer login-wave-front" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V89C125 89 125 95 250 95S375 89 500 89S625 82 750 82S875 89 1000 89S1125 95 1250 95S1375 89 1500 89S1625 82 1750 82S1875 89 2000 89V0Z"></path></svg></div></div><div class="login-photo-placeholder" aria-label="Espacio reservado para la fotografía institucional"><span class="login-photo-icon" aria-hidden="true"></span><span>Fotografía del Club</span><small>Espacio reservado</small></div></section><main class="login-main"><div class="login-form"><img class="club-logo" src="./logo-cgp-formal.svg" alt="Club de Golf de Panamá"><div class="eyebrow">Club de Golf de Panamá</div><p><span class="badge '+(state.offlineReady?'green':'amber')+'">'+(state.offlineReady?'Offline listo':'Offline no preparado')+'</span></p><h2>'+(serverUnknown?'Servidor no disponible':firstSetup?'Acceso a Mari':'Acceso a Mari')+'</h2><p>'+status+'</p><form id="login-form"'+(serverUnknown?' hidden':'')+'>'+roleHtml+'<div class="field"><label for="login-name">Tu nombre</label><input id="login-name" name="name" autocomplete="name" required maxlength="80" placeholder="Nombre y apellidos" value="'+esc(activationName)+'"></div>'+passwordHtml+actionHtml+'</form>'+(serverUnknown?'<button class="button primary" type="button" data-action="reload">Reintentar conexión →</button>':'')+offlineHtml+'<p class="footnote">'+(serverUnknown?'Vuelva a intentar cuando haya conexión. No se han eliminado los datos de este navegador.':firstSetup?'El acceso de contador no requiere código ni autorización individual. La administración se activa con la cuenta propietaria verificada.':'Los contadores ingresan con su nombre; este no otorga permisos administrativos.')+' Mantén este navegador para conservar la sesión y sincronizar registros pendientes.</p></div></main></div>';
  const role=$('#login-role'),credentials=$('#admin-credentials');
  const updateRole=()=>{const isAdmin=!!role&&role.value==='admin';if(credentials)credentials.hidden=!isAdmin;const password=$('#login-password');if(password)password.required=isAdmin&&(!firstSetup||ownerVerified);const submit=$('#login-submit'),verify=$('#owner-verify');if(submit){submit.hidden=firstSetup&&!ownerVerified&&isAdmin;submit.textContent=firstSetup&&isAdmin?'Crear contraseña administrativa →':'Entrar al inventario →'}if(verify)verify.hidden=!isAdmin};
  if(role){role.addEventListener('change',updateRole);updateRole()}
