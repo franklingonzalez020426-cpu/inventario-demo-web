@@ -1,5 +1,5 @@
 'use strict';
-const CACHE='inventario-demo-gh-pages-v14';
+const CACHE='inventario-demo-gh-pages-v15';
 const BASE=new URL('./',self.registration.scope);
 const asset=path=>new URL(path,BASE).href;
 const SHELL=['','index.html','manifest.webmanifest','icon.svg','logo-cgp-formal.svg','mari-club-photo.jpg'].map(asset);
