@@ -83,6 +83,14 @@
 /* Tablet fit: keep all branding inside the green panel and tuck the image farther beneath it. */
 @media(max-width:1000px){.login-hero{height:410px;grid-template-rows:190px 220px}.login-hero-green{padding-top:20px;padding-bottom:48px}.login-photo-placeholder{margin-top:-44px}.login-photo{transform:scale(1.08);object-position:center 55%}}
 @media(max-width:420px){.login-hero{height:400px;grid-template-rows:185px 215px}.login-hero-green{padding-top:18px;padding-bottom:42px}.login-photo-placeholder{margin-top:-42px}}
+
+/* Keep the photo behind the green arc so no blank strip appears on narrow screens. */
+.login-hero{position:relative}
+.login-hero-green{z-index:2}
+.login-photo-placeholder{position:absolute;inset:30% 0 0;z-index:1;margin:0!important;min-height:0;padding:0}
+.login-photo{transform:scale(1.08);object-position:center 55%}
+.login-wave-front{animation:none!important}
+.login-wave-back{opacity:.42;animation-duration:18s;animation-delay:-7s}
 </style><script>'use strict'; window.INVENTORY_CLOUD={url:'https://dybdaadrosstijjflsfi.supabase.co',publishableKey:'sb_publishable_Y7sIGqp9_PBgaAbwkdH9CA_nFW2UxN1',functionName:'inventory-gateway'}; window.INVENTORY_DEVELOPMENT=true;</script><script>
 /**
  * Minified by jsDelivr using Terser v5.37.0.
