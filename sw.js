@@ -1,8 +1,8 @@
 'use strict';
-const CACHE='inventario-demo-gh-pages-v22';
+const CACHE='inventario-demo-gh-pages-v23';
 const BASE=new URL('./',self.registration.scope);
 const asset=path=>new URL(path,BASE).href;
-const SHELL=['','index.html','manifest.webmanifest','icon.svg','logo-cgp-formal.svg','mari-club-photo.jpg'].map(asset);
+const SHELL=['','index.html','manifest.webmanifest','icon.svg','logo-cgp-formal.svg','mari-logo.svg','mari-club-photo.jpg'].map(asset);
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL.map(url => new Request(url, { cache: 'reload' })))).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(names=>Promise.all(names.filter(n=>n.startsWith('inventario-')&&n!==CACHE).map(n=>caches.delete(n)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',event=>{const url=new URL(event.request.url);if(event.request.method!=='GET'||url.origin!==self.location.origin)return;if (event.request.mode === 'navigate') {
