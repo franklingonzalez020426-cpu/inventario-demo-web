@@ -92,34 +92,38 @@
 .login-wave-front{animation:none!important}
 .login-wave-back{opacity:.42;animation-duration:18s;animation-delay:-7s}
 
-@media (max-width: 600px), (max-width: 960px) and (max-height: 500px) and (pointer: coarse) {
+@media (max-width: 600px) {
   .login {
-    height: 100vh;
-    height: 100dvh;
-    min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
+    --login-brand-height: 190px;
   }
 
   .login-hero {
+    position: sticky;
+    top: 0;
+    z-index: 0;
+    align-self: start;
     max-height: max(230px, 48vh);
     max-height: max(230px, 48dvh);
+    grid-template-rows: var(--login-brand-height) minmax(0, 1fr);
   }
 
   .login-main {
-    min-height: 0;
+    position: relative;
+    z-index: 1;
     min-width: 0;
-    overflow-y: auto;
-    overscroll-behavior-y: contain;
+    min-height: calc(100vh - var(--login-brand-height));
+    min-height: calc(100dvh - var(--login-brand-height));
     padding-bottom: max(30px, calc(env(safe-area-inset-bottom) + 12px));
-    scroll-padding-block: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  .login {
+    --login-brand-height: 185px;
   }
 }
 
 @media (max-width: 600px) and (max-height: 500px), (max-width: 960px) and (max-height: 500px) and (pointer: coarse) {
-  .login {
-    grid-template-rows: minmax(0, 1fr);
-  }
-
   .login-hero {
     display: none;
   }
