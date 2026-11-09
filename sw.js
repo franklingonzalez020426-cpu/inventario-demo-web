@@ -1,5 +1,5 @@
 'use strict';
-const CACHE='inventario-demo-gh-pages-v7';
+const CACHE='inventario-demo-gh-pages-v8';
 const BASE=new URL('./',self.registration.scope);
 const asset=path=>new URL(path,BASE).href;
 const SHELL=['','index.html','manifest.webmanifest','icon.svg','logo-cgp-formal.svg'].map(asset);
