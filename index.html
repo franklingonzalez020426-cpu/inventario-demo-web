@@ -895,7 +895,7 @@ function renderMissing(){
 function renderAdmin(){
   if(!state.session.user.admin)return renderAdminSettings();
   const warehouses=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));
-  return header('Supervisión del inventario',state.period?periodName():'Seleccione un período mensual.',button('Auditoría','audit')+button('Importar XLS','import','','primary'))+
+  return header('Supervisión del inventario',state.period?periodName():'Seleccione un período mensual.',button('Auditoría','audit')+(cloud?button('Usuarios','accounts'):'')+button('Importar XLS','import','','primary'))+
     (!state.online?notice('Información de la última consulta. Verifique con el servidor antes de cerrar.','amber'):'')+
     `<div class="table-wrap"><table><thead><tr><th>Bodega</th><th>Estado</th><th>Con registro</th><th>Sin resolver</th><th>Dispositivos</th><th>Revisión</th></tr></thead><tbody>${warehouses.map(w=>`<tr><td class="wrap"><b>${esc(w.code)}</b><br>${esc(w.name)}</td><td>${statusBadge(w.status)}</td><td>${esc(w.counted_count??'—')}</td><td>${Math.max(0,Number(w.items_count||0)-Number(w.counted_count||0))}</td><td>${(w.participants||[]).filter(p=>!p.finished).length} en conteo / ${(w.participants||[]).length} registrados</td><td><div class="actions">${button('Resultados','admin-scope',`data-code="${esc(w.code)}" data-page="consolidation"`,'small')}${button('Faltantes','admin-scope',`data-code="${esc(w.code)}" data-page="missing"`,'small')}${button('Reportes y firmas','admin-scope',`data-code="${esc(w.code)}" data-page="reports"`,'small')}</div></td></tr>`).join('')||'<tr><td colspan="6">Sin bodegas en el período seleccionado.</td></tr>'}</tbody></table></div><div class="divider"></div>`+
     renderAdminSettings();
@@ -1038,7 +1038,7 @@ function notice(text,kind=''){return `<div class="notice ${kind}">${text}</div>`
 function button(label,action,extra='',cls=''){return `<button type="button" class="button ${cls}" data-action="${action}" ${extra}>${label}</button>`}
 function toast(message,error=false){const el=$('#toast');el.textContent=message;el.className='visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',error?7000:4200)}
 async function cloudRefresh(force=false){
- if(!cloud)return null;
+ if(!cloud||state.session?.user.username)return null;
  if(cloudRefreshRun)return cloudRefreshRun;
  cloudRefreshRun=(async()=>{
   const prior=state.session?.cloudAuth||state.cloudAuth||await get('cloud_auth');
@@ -1061,6 +1061,7 @@ async function cloudRefresh(force=false){
   let fresh;
   if(navigator.locks?.request)fresh=await navigator.locks.request('inventario-supabase-refresh-'+cloud.url,rotate);
   else fresh=await rotate();
+  if(state.session?.user.username)return null;
   state.cloudAuth=fresh;
   if(state.session){state.session.cloudAuth=fresh;state.session.token=fresh.access_token;await put('session',state.session)}
   await put('cloud_auth',fresh);
@@ -1084,7 +1085,7 @@ async function renewCounterSession(){
 }async function cloudIdentity(){if(!cloud) return null;const saved=await get('cloud_auth');if(saved?.refresh_token){const response=await fetch(`${cloud.url}/auth/v1/token?grant_type=refresh_token`,{method:'POST',headers:{apikey:cloud.publishableKey,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:saved.refresh_token})});if(response.ok){const next=await response.json();const auth={access_token:next.access_token,refresh_token:next.refresh_token,expires_at:next.expires_at||Math.floor(Date.now()/1000)+(next.expires_in||3600)};await put('cloud_auth',auth);return auth}}const response=await fetch(`${cloud.url}/auth/v1/signup`,{method:'POST',headers:{apikey:cloud.publishableKey,'Content-Type':'application/json'},body:'{}'});if(!response.ok)throw new Error('No se pudo crear la identidad segura de este dispositivo en Supabase.');const next=await response.json();if(!next.access_token||!next.refresh_token)throw new Error('Supabase no devolvió una sesión anónima. Habilita las identidades anónimas en Auth.');const auth={access_token:next.access_token,refresh_token:next.refresh_token,expires_at:next.expires_at||Math.floor(Date.now()/1000)+(next.expires_in||3600)};await put('cloud_auth',auth);return auth}
 async function requestApi(path,body,opts={}){
  const headers={'Accept':'application/json'};let url='/api'+path;
- if(cloud){const fresh=state.session?.cloudAuth||state.cloudAuth?await cloudRefresh(false):null;url=`${cloud.url}/functions/v1/${cloud.functionName}/api${path}`;headers.apikey=cloud.publishableKey;const token=fresh?.access_token||state.session?.token||state.cloudAuth?.access_token;if(token)headers.Authorization='Bearer '+token}
+ if(cloud){const fresh=path!=='/account/login'&&!state.session?.user.username&&(state.session?.cloudAuth||state.cloudAuth)?await cloudRefresh(false):null;url=`${cloud.url}/functions/v1/${cloud.functionName}/api${path}`;headers.apikey=cloud.publishableKey;const token=path==='/account/login'?null:fresh?.access_token||state.session?.token||state.cloudAuth?.access_token;if(token)headers.Authorization='Bearer '+token}
  else if(state.session?.token)headers.Authorization='Bearer '+state.session.token;
  if(body!==undefined)headers['Content-Type']='application/json';let response;
  try{response=await fetch(url,{method:body===undefined?'GET':'POST',headers,body:body===undefined?undefined:JSON.stringify(body),...opts})}
@@ -1094,7 +1095,17 @@ async function requestApi(path,body,opts={}){
  return response.json();
 }
 async function api(path,body,opts={}){
+ const session=state.session;
  try{return await requestApi(path,body,opts)}catch(first){
+  if(state.session!==session)throw first;
+  if(session?.user.username){
+   if(first.status===401){
+    const persisted=await get('session');
+    if(persisted?.user.id===session.user.id&&persisted.token!==session.token&&!persisted.expired){state.session=persisted;return await requestApi(path,body,opts);}
+    if(state.session===session){session.expired=true;await put('session',session);}
+   }
+   throw first;
+  }
   if(!cloud||opts.noRecovery||path==='/login'||path==='/session/renew'||state.session?.user.admin||!(first.status===401||first.code==='counter_session_revoked')){
    if(state.session&&(first.status===401||first.code==='counter_session_revoked')){state.session.expired=true;await put('session',state.session)}throw first;
   }
@@ -1112,7 +1123,7 @@ async function api(path,body,opts={}){
  }
 }
 async function loadQueue(){state.queue=(await all('operations')).filter(o=>!o.resolved).sort(operationOrder)}
-async function refresh(silent=false){if(!state.session)return false;const sessionId=state.session.user.id;try{const data=await api('/state');if(!state.session||state.session.user.id!==sessionId)return false;state.data=data;state.session.expired=false;state.session.user=data.user;await put('session',state.session);await put('snapshot:'+data.user.id,data);if(state.period&&!data.periods.some(p=>String(p.id)===String(state.period))){setWarehouseScope(null,null);state.page='periods'}for(const w of data.warehouses||[]){const part=(w.participants||[]).find(p=>p.session_id===data.user.id);const k=key(w.period_id,w.code);if(part&&!part.finished&&!part.retired&&w.status!=='closed')state.joined[k]=true;else delete state.joined[k]}await put('joined:'+state.session.user.id,state.joined);if(!silent)render();return true}catch(e){if(!silent)toast(e.message,true);if((e.status===401||e.code==='counter_session_revoked')&&state.session?.user.id===sessionId){state.session.expired=true;await put('session',state.session)}if(!silent)render();return false}}
+async function refresh(silent=false){if(!state.session)return false;const activeSession=state.session;const sessionId=activeSession.user.id;try{const data=await api('/state');if(state.session!==activeSession)return false;state.data=data;state.session.expired=false;state.session.user=data.user;await put('session',state.session);await put('snapshot:'+data.user.id,data);if(state.period&&!data.periods.some(p=>String(p.id)===String(state.period))){setWarehouseScope(null,null);state.page='periods'}for(const w of data.warehouses||[]){const part=(w.participants||[]).find(p=>p.session_id===data.user.id);const k=key(w.period_id,w.code);if(part&&!part.finished&&!part.retired&&w.status!=='closed')state.joined[k]=true;else delete state.joined[k]}await put('joined:'+state.session.user.id,state.joined);if(!silent)render();return true}catch(e){if(!silent)toast(e.message,true);if((e.status===401||e.code==='counter_session_revoked')&&state.session===activeSession){state.session.expired=true;await put('session',state.session)}if(!silent)render();return false}}
 async function ensureParticipation(periodId=state.period,warehouse=state.warehouse,force=false,resume=false){
   const scope={...warehouseScope(),period:periodId,warehouse};
   if(!scope.owner||!periodId||!warehouse)throw new Error('Seleccione una bodega disponible para contar.');
@@ -1297,8 +1308,8 @@ const mariIconPaths={
 function mariIcon(name){
   return `<svg class="mari-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${mariIconPaths[name]}</svg>`;
 }
-function render(){if(!state.session){renderLogin();return}const user=state.session.user;const q=pending();const nav=[['periods','Inventarios'],['warehouses','Bodegas'],['count','Contar'],['records','Mis registros']];if(user.admin)nav.push(['admin','Administración']);const names={periods:'Inventarios mensuales',warehouses:'Bodegas',count:'Conteo físico',records:'Mis registros',admin:'Administración',consolidation:'Consolidación',reports:'Reportes y firmas',history:'Historial'};$('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand mari-app-brand"><span class="mari-app-brand__plate"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></span><span class="mari-app-brand__caption">Conteo de<br>inventario</span></div><nav class="nav" aria-label="Navegación principal">${nav.map(([page,name])=>`<button class="${state.page===page?'active':''}" data-action="nav" data-page="${page}" ${state.page===page?'aria-current="page"':''}>${mariIcon(page)}${name}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="person">${esc(user.name)}</div><div class="role">${user.admin?'Administración':'Contador'} · ${esc(user.device_id?.slice(-6)||'Este dispositivo')}</div><button data-action="identity">Cambiar identificación →</button>${state.install?button('Instalar aplicación','install','','small install'):''}</div></aside><main class="main"><div class="topbar"><div class="crumb"><span class="mari-breadcrumb-root">Mari</span><span class="mari-breadcrumb-divider" aria-hidden="true">/</span> ${esc(names[state.page]||'Inventarios')}${state.period?' / '+esc(periodName()):''}</div><div class="brand mobile-brand mari-app-mobile"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></div><div class="top-status">${window.INVENTORY_DEVELOPMENT?'<span class="dev-mark">DESARROLLO</span>':''}<span class="status ${!state.online?'offline':''}"><span class="dot"></span>${state.online?'Conectado':'Sin conexión'}</span><span class="badge ${state.offlineReady?'green':'amber'}">${state.offlineReady?'Offline listo':'Offline no preparado'}</span><span id="sync-status">${renderSyncStatus(q)}</span>${button(esc(user.name),'identity','','small ghost')}${button('Salir','logout','','small ghost')}</div></div><div class="content">${!window.isSecureContext?notice('Este acceso usa HTTP. Para instalar y volver a abrir la aplicación sin Wi-Fi desde una tablet, configura HTTPS en la red local; consulta la guía de instalación.','amber'):''}${!state.offlineReady?notice('La protección offline todavía no está lista. Mantén esta página abierta y vuelve a cargar antes de empezar a contar.','amber'):''}${!state.online?notice('Trabajando sin conexión. Los conteos se conservan en este navegador y se enviarán al recuperar la conexión.','amber'):''}${state.session.expired?(user.admin?notice('La sesión administrativa necesita revalidación. '+button('Renovar sesión','renew-session','','small primary'),'amber'):notice('No se pudo renovar la sesión automáticamente. Los conteos permanecen guardados; avise a administración.','amber')):''}${renderPage()}</div></main></div>`;if(state.page==='count')SmartSheet.mount().catch(e=>toast(e.message,true));}
-function renderPage(){if(state.scopeLoading&&['count','records','consolidation','missing','reports'].includes(state.page))return notice('Cargando la bodega…');switch(state.page){case'periods':case'history':return renderPeriods();case'warehouses':return renderWarehouses();case'audit':return renderAudit();case'missing':return renderMissing();case'count':return renderCount();case'records':return renderRecords();case'admin':return renderAdmin();case'consolidation':return renderConsolidation();case'reports':return renderReports();default:return renderPeriods()}}
+function render(){if(!state.session){renderLogin();return}const user=state.session.user;const q=pending();const nav=[['periods','Inventarios'],['warehouses','Bodegas'],['count','Contar'],['records','Mis registros']];if(user.admin)nav.push(['admin','Administración']);const names={periods:'Inventarios mensuales',warehouses:'Bodegas',count:'Conteo físico',records:'Mis registros',admin:'Administración',accounts:'Usuarios',consolidation:'Consolidación',reports:'Reportes y firmas',history:'Historial'};$('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand mari-app-brand"><span class="mari-app-brand__plate"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></span><span class="mari-app-brand__caption">Conteo de<br>inventario</span></div><nav class="nav" aria-label="Navegación principal">${nav.map(([page,name])=>`<button class="${state.page===page?'active':''}" data-action="nav" data-page="${page}" ${state.page===page?'aria-current="page"':''}>${mariIcon(page)}${name}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="person">${esc(user.name)}</div><div class="role">${user.admin?'Administración':'Contador'} · ${esc(user.device_id?.slice(-6)||'Este dispositivo')}</div><button data-action="identity">Cambiar identificación →</button>${state.install?button('Instalar aplicación','install','','small install'):''}</div></aside><main class="main"><div class="topbar"><div class="crumb"><span class="mari-breadcrumb-root">Mari</span><span class="mari-breadcrumb-divider" aria-hidden="true">/</span> ${esc(names[state.page]||'Inventarios')}${state.period?' / '+esc(periodName()):''}</div><div class="brand mobile-brand mari-app-mobile"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></div><div class="top-status">${window.INVENTORY_DEVELOPMENT?'<span class="dev-mark">DESARROLLO</span>':''}<span class="status ${!state.online?'offline':''}"><span class="dot"></span>${state.online?'Conectado':'Sin conexión'}</span><span class="badge ${state.offlineReady?'green':'amber'}">${state.offlineReady?'Offline listo':'Offline no preparado'}</span><span id="sync-status">${renderSyncStatus(q)}</span>${button(esc(user.name),'identity','','small ghost')}${button('Salir','logout','','small ghost')}</div></div><div class="content">${!window.isSecureContext?notice('Este acceso usa HTTP. Para instalar y volver a abrir la aplicación sin Wi-Fi desde una tablet, configura HTTPS en la red local; consulta la guía de instalación.','amber'):''}${!state.offlineReady?notice('La protección offline todavía no está lista. Mantén esta página abierta y vuelve a cargar antes de empezar a contar.','amber'):''}${!state.online?notice('Trabajando sin conexión. Los conteos se conservan en este navegador y se enviarán al recuperar la conexión.','amber'):''}${state.session.expired?(user.username?notice('Vuelve a entrar con tu cuenta para enviar los conteos pendientes. '+button('Volver a entrar','renew-session','','small primary'),'amber'):user.admin?notice('La sesión administrativa necesita revalidación. '+button('Renovar sesión','renew-session','','small primary'),'amber'):notice('No se pudo renovar la sesión automáticamente. Los conteos permanecen guardados; avise a administración.','amber')):''}${renderPage()}</div></main></div>`;if(state.page==='count')SmartSheet.mount().catch(e=>toast(e.message,true));}
+function renderPage(){if(state.scopeLoading&&['count','records','consolidation','missing','reports'].includes(state.page))return notice('Cargando la bodega…');switch(state.page){case'periods':case'history':return renderPeriods();case'warehouses':return renderWarehouses();case'audit':return renderAudit();case'missing':return renderMissing();case'count':return renderCount();case'records':return renderRecords();case'admin':return renderAdmin();case'accounts':return renderAccounts();case'consolidation':return renderConsolidation();case'reports':return renderReports();default:return renderPeriods()}}
 function renderPeriods(){
   const periods=[...(state.data?.periods||[])].sort((a,b)=>Number(b.year)-Number(a.year)||Number(b.month)-Number(a.month));
   const warehouses=state.data?.warehouses||[];
@@ -1460,7 +1471,123 @@ function reviewParticipants(){
     toast('Sesiones revisadas. Los conteos recibidos siguen disponibles.');
   });
 }
-function renderAdminSettings(){if(!state.session.user.admin)return empty('Acceso administrativo','Introduce la contraseña administrativa para continuar.',button('Acceder','elevate','','primary'));const ws=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return `<div class="admin-grid"><section class="card"><div class="card-title"><h2>Preparación</h2><span class="badge">${esc(state.period?periodName():'Sin período')}</span></div><p class="section-caption">Puede actualizar la existencia teórica con un XLS mientras el período permanezca abierto. Se conservan los conteos físicos, correcciones, propietarios y firmas.</p><div class="actions">${button('Nuevo período','new-period')}${button('Agregar bodega','new-warehouse',!state.period?'disabled':'')}${button('Seleccionar período','nav','data-page="periods"')}${state.warehouse?button('Artículo nuevo','new-article'):''}</div><div class="divider"></div>${button('Cambiar contraseña administrativa','change-password','','ghost')}</section><section class="card"><h2>Control del cierre</h2><p class="section-caption">Cada reporte definitivo requiere dos firmas independientes y todas las operaciones conocidas sincronizadas.</p>${ws.length?ws.map(w=>`<div class="list-detail"><span>${esc(w.code)} · ${esc(w.name)}</span>${statusBadge(w.status)}</div>`).join(''):'<p class="muted small">Selecciona un período con bodegas.</p>'}<div class="actions" style="margin-top:20px">${button('Progreso de bodegas','nav','data-page="warehouses"')}${button('Cerrar inventario mensual','close-month',!state.period?'disabled':'','primary')}</div></section><section class="card span2"><h2>Historial de importaciones</h2>${renderImportHistory()}</section></div>`}
+function getDeviceId(){
+  return new Promise((resolve,reject)=>{
+    const transaction=db.transaction('kv','readwrite'),store=transaction.objectStore('kv');
+    let device;
+    transaction.oncomplete=()=>resolve(device);
+    transaction.onerror=()=>reject(transaction.error);
+    transaction.onabort=()=>reject(transaction.error);
+    const request=store.get('device_id');
+    request.onsuccess=()=>{
+      device=request.result||uid();
+      if(!request.result)store.put(device,'device_id');
+    };
+  });
+}
+async function saveNamedSession(result){
+  if(!result?.user?.username||!result.token)throw new Error('El servidor no confirmó la cuenta.');
+  const session={...result,expired:false};
+  state.session=session;
+  state.cloudAuth=null;
+  state.accountsEnabled=true;
+  await atomic(['kv'],transaction=>{
+    const store=transaction.objectStore('kv');
+    store.put(session,'session');
+    store.put({initialized:true,accounts_enabled:true},'names');
+    store.delete('cloud_auth');
+    store.delete('owner_activation_name');
+  });
+}
+function accountPasswordFields(){
+  return `<div class="field"><label for="account-password">Contraseña nueva</label><input id="account-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required><span class="help">Mínimo 12 caracteres.</span></div>
+  <div class="field"><label for="account-password-confirm">Repite la contraseña</label><input id="account-password-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div>`;
+}
+function confirmedAccountPassword(form){
+  const password=String(form.get('password')||'');
+  if(password!==form.get('password_confirm'))throw new Error('Las contraseñas no coinciden.');
+  return password;
+}
+function renderAccounts(){
+  if(!state.session.user.admin)return notice('Acceso administrativo requerido.','amber');
+  const info=state.accountList;
+  if(!info)return notice('Cargando usuarios…');
+  const heading=header('Usuarios',info.enabled?'Gestiona el acceso del personal a Mari.':'Crea tu cuenta administradora para activar el acceso por usuario y contraseña.',button(info.enabled?'Crear usuario':'Crear mi cuenta administradora','create-account','','primary')+button('Administración','nav','data-page="admin"'));
+  return heading+(info.accounts.length?`<div class="stack">${info.accounts.map(account=>{
+    const own=account.username===state.session.user.username;
+    const data=`data-username="${esc(account.username)}"`;
+    return `<article class="record">
+      <div><h3>${esc(account.name)}</h3><p>${esc(account.username)} · ${account.role==='admin'?'Administración':'Contador'}${own?' · Tu cuenta':''}</p>
+      <span class="badge ${account.enabled?'green':'amber'}">${account.enabled?'Activo':'Desactivado'}</span></div>
+      <div class="actions">${button('Cambiar contraseña','account-password',data,'small')}${own?'':button(account.enabled?'Desactivar':'Activar','account-status',data,'small')}</div>
+    </article>`;
+  }).join('')}</div>`:notice('Al crear tu cuenta, Mari conservará los conteos de esta sesión y habilitará el acceso por usuario y contraseña.'));
+}
+async function openAccounts(){
+  requireOnline();
+  const owner=state.session.user.id;
+  const result=await api('/accounts');
+  if(state.session?.user.id!==owner||!state.session.user.admin)return;
+  state.accountList=result;
+  state.accountsEnabled=result.enabled===true;
+  await navigate('accounts');
+}
+function createAccountDialog(){
+  requireOnline();
+  const first=!state.accountList?.enabled;
+  dialog(first?'Crear mi cuenta administradora':'Crear usuario',`
+    <div class="field"><label for="account-username">Usuario</label><input id="account-username" name="username" autocomplete="off" autocapitalize="none" spellcheck="false" minlength="3" maxlength="40" required><span class="help">Letras, números, punto, guion o guion bajo.</span></div>
+    ${first?`<p class="section-caption">La cuenta quedará a nombre de ${esc(state.session.user.name)} y conservará la sesión de este navegador.</p>`:'<div class="field"><label for="account-name">Nombre y apellidos</label><input id="account-name" name="name" autocomplete="off" maxlength="80" required></div><div class="field"><label for="account-role">Rol</label><select id="account-role" name="role"><option value="counter">Contador</option><option value="admin">Administrador</option></select></div>'}
+    ${accountPasswordFields()}
+  `,first?'Activar mi cuenta':'Crear usuario',async(form,modal)=>{
+    requireOnline();
+    const body={username:String(form.get('username')||'').trim(),name:first?state.session.user.name:form.get('name'),role:first?'admin':form.get('role'),password:confirmedAccountPassword(form)};
+    if(syncRun)await syncRun.catch(()=>{});
+    const result=await api('/accounts/create',body);
+    if(result.login)await saveNamedSession(result.login);
+    modal.close();
+    await openAccounts();
+    toast(first?'Cuenta administradora activa. Ya puedes crear los usuarios del personal.':'Usuario creado.');
+  });
+}
+function changeAccountPassword(username){
+  requireOnline();
+  dialog('Cambiar contraseña',`<p class="section-caption">Cuenta ${esc(username)}.</p>`+accountPasswordFields(),'Guardar contraseña',async(form,modal)=>{
+    requireOnline();
+    await api('/accounts/password',{username,password:confirmedAccountPassword(form)});
+    modal.close();
+    await openAccounts();
+    toast('Contraseña actualizada.');
+  });
+}
+function changeAccountStatus(username){
+  requireOnline();
+  const account=state.accountList?.accounts.find(item=>item.username===username);
+  if(!account)return;
+  const enabled=!account.enabled;
+  dialog(enabled?'Activar usuario':'Desactivar usuario',`<p class="section-caption">${esc(account.name)} · ${esc(username)}. ${enabled?'La cuenta podrá iniciar sesión con su contraseña.':'Se cerrarán las sesiones de esta cuenta. Los conteos ya enviados se conservan.'}</p>`,enabled?'Activar':'Desactivar',async(_form,modal)=>{
+    requireOnline();
+    await api('/accounts/status',{username,enabled});
+    modal.close();
+    await openAccounts();
+    toast(enabled?'Usuario activo.':'Usuario desactivado.');
+  });
+}
+function reauthenticateAccount(){
+  if(!state.online||!navigator.onLine)throw new Error('Conéctate para ingresar. Los conteos pendientes se conservan en este navegador.');
+  const previous=state.session.user;
+  dialog('Volver a entrar',`<p class="section-caption">Usuario ${esc(previous.username)}.</p><div class="field"><label for="reauth-secret">Contraseña</label><input id="reauth-secret" name="secret" type="password" autocomplete="current-password" required></div>`,'Entrar',async(form,modal)=>{
+    const result=await requestApi('/account/login',{username:previous.username,password:form.get('secret'),device_id:previous.device_id});
+    if(result.user.id!==previous.id)throw new Error('No se pudo recuperar el conteo de este navegador.');
+    await saveNamedSession(result);
+    modal.close();
+    await refresh(true);
+    render();
+    await sync(false,true).catch(()=>{});
+  });
+}
+
+function renderAdminSettings(){if(!state.session.user.admin)return empty('Acceso administrativo','Introduce la contraseña administrativa para continuar.',button('Acceder','elevate','','primary'));const ws=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return `<div class="admin-grid"><section class="card"><div class="card-title"><h2>Preparación</h2><span class="badge">${esc(state.period?periodName():'Sin período')}</span></div><p class="section-caption">Puede actualizar la existencia teórica con un XLS mientras el período permanezca abierto. Se conservan los conteos físicos, correcciones, propietarios y firmas.</p><div class="actions">${button('Nuevo período','new-period')}${button('Agregar bodega','new-warehouse',!state.period?'disabled':'')}${button('Seleccionar período','nav','data-page="periods"')}${state.warehouse?button('Artículo nuevo','new-article'):''}</div><div class="divider"></div>${state.session.user.username?'':button('Cambiar contraseña administrativa','change-password','','ghost')}</section><section class="card"><h2>Control del cierre</h2><p class="section-caption">Cada reporte definitivo requiere dos firmas independientes y todas las operaciones conocidas sincronizadas.</p>${ws.length?ws.map(w=>`<div class="list-detail"><span>${esc(w.code)} · ${esc(w.name)}</span>${statusBadge(w.status)}</div>`).join(''):'<p class="muted small">Selecciona un período con bodegas.</p>'}<div class="actions" style="margin-top:20px">${button('Progreso de bodegas','nav','data-page="warehouses"')}${button('Cerrar inventario mensual','close-month',!state.period?'disabled':'','primary')}</div></section><section class="card span2"><h2>Historial de importaciones</h2>${renderImportHistory()}</section></div>`}
 function renderImportHistory(){const imports=(state.data.imports||[]).filter(x=>!state.period||String(x.period_id)===String(state.period));return imports.length?`<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Archivo</th><th>Bodega</th><th>Artículos</th><th>Estado</th><th>Auditoría</th></tr></thead><tbody>${imports.map(x=>`<tr><td>${esc(x.at||x.created_at||'')}</td><td class="wrap">${esc(x.name||x.filename||'Importación')}</td><td>${esc(x.warehouse||x.warehouse_code||'')}</td><td>${esc(x.rows_count??x.rows??'')}</td><td>${esc(x.status||'Importado')}</td><td>${button('Ver cambios','import-changes',`data-id="${esc(x.id)}"`,'small ghost')}</td></tr>`).join('')}</tbody></table></div>`:'<p class="small muted">No hay importaciones registradas para este período.</p>'}
 function renderConsolidation(){const c=state.consolidation;return header('Resultado consolidado','Una línea por bodega, código y presentación. Las cantidades parciales se suman; las correcciones reemplazan.',button('Conteo','nav','data-page="count"')+button('Revisión de faltantes','nav','data-page="missing"')+button('Reportes y firmas','nav','data-page="reports"','primary'))+(!state.online?notice('Esta vista corresponde a la última consulta guardada. Consulta al servidor para obtener la consolidación actual.','amber'):'')+(c?`${(c.recounts||[]).length?notice('Hay '+c.recounts.length+' recuentos completos pendientes de decisión. No se suman automáticamente.','amber')+`<div class="stack" style="margin-bottom:20px">${c.recounts.map(r=>`<div class="record"><div><h3>Recuento · ${esc(r.code)} · ${esc(r.presentation)}</h3><p>${esc(r.owner_name)} · Cantidad propuesta ${esc(r.quantity)}</p></div>${state.session.user.admin?button('Resolver','resolve-recount',`data-id="${esc(r.id)}"`):''}</div>`).join('')}</div>`:''}${(c.conflicts||[]).length?notice('Hay '+c.conflicts.length+' conflictos de revisión pendientes. Resuélvelos antes del reporte definitivo.','red')+c.conflicts.map(x=>`<div class="record" style="margin-bottom:15px"><div><h3>Conflicto de revisión</h3><p>${esc(x.reason)} · ${esc(x.record_id)}</p></div>${button('Resolver conflicto','resolve-server-conflict',`data-operation="${esc(x.operation_id)}"`,'small')}</div>`).join(''):''}<div class="table-wrap"><table><thead><tr><th>Código / Artículo</th><th>Presentación</th><th class="right">Costo unitario</th><th class="right">Teórico</th><th class="right">Físico</th><th class="right">Diferencia</th><th class="right">Parciales</th><th>Revisión</th></tr></thead><tbody>${(c.rows||[]).map(r=>`<tr><td class="wrap"><strong>${esc(r.code)}</strong><br>${esc(r.name)}${r.is_new?' <span class="badge amber">Nuevo</span>':''}</td><td>${esc(r.presentation)}</td><td class="right">${r.cost==null?'—':esc(r.cost)}</td><td class="right">${esc(r.theoretical)}</td><td class="right"><strong>${r.quantity===null||r.quantity===undefined?'<span class="muted">Sin contar</span>':esc(r.quantity)}</strong></td><td class="right">${r.quantity==null||r.theoretical==null?'—':esc(decimalDifference(r.quantity,r.theoretical))}</td><td class="right">${Array.isArray(r.partials)?r.partials.length:esc(r.partials)}</td><td>${!isClosed()?button('Recuento completo','recount-item',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}"`,'small'):''}</td></tr>`).join('')}</tbody></table></div>`:empty('No hay resultados disponibles','Se necesita conexión para consultar por primera vez la consolidación.'))}
 function renderCloseReadiness(warehouse){
@@ -1486,11 +1613,12 @@ async function renderLogin(){
  const activationName=await get('owner_activation_name')||'';
  let serverChecked=false;
  try{
-  if(navigator.onLine){const n=await api('/names');state.initialized=n.initialized;serverChecked=true;await put('names',n)}
-  else{const n=await get('names');if(n){state.initialized=n.initialized;serverChecked=true}}
+  if(navigator.onLine){const n=await api('/names');state.initialized=n.initialized;state.accountsEnabled=n.accounts_enabled===true;serverChecked=true;await put('names',n)}
+  else{const n=await get('names');if(n){state.initialized=n.initialized;state.accountsEnabled=n.accounts_enabled===true;serverChecked=true}}
  }catch{state.initialized=null}
  if(state.session)return;
- const firstSetup=state.initialized===false;
+ const namedMode=!!cloud&&state.accountsEnabled===true;
+ const firstSetup=!namedMode&&state.initialized===false;
  let ownerVerified=false;
  if(firstSetup&&cloud){
   try{const saved=await get('cloud_auth');if(saved?.refresh_token){state.cloudAuth=await cloudIdentity();ownerVerified=(await api('/admin/activation-status')).owner_verified===true}}catch{}
@@ -1498,12 +1626,13 @@ async function renderLogin(){
  state.ownerVerified=ownerVerified;
  const serverUnknown=state.initialized===null;
  const counterReady=!serverUnknown;
- const status=serverUnknown?'No se pudo verificar el estado del servidor. Compruebe la conexión e inténtelo de nuevo. Sus conteos locales permanecen guardados.':firstSetup?(ownerVerified?'El acceso de contador está disponible. Identidad propietaria verificada: seleccione administración para crear su contraseña.':'El acceso de contador está disponible con el nombre. La activación administrativa requiere verificar la cuenta propietaria una sola vez.'):'El personal entra con su nombre. El acceso administrativo requiere la contraseña compartida.';
- const roleHtml=serverUnknown?'':'<div class="field"><label for="login-role">Tipo de acceso</label><select id="login-role" name="role"><option value="counter">Entrar como contador</option><option value="admin">Entrar como administrador</option></select></div>';
- const passwordHtml=firstSetup?(ownerVerified?'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256"></div></div>':''):'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="256"></div></div>';
+ const status=serverUnknown?'No se pudo verificar el estado del servidor. Compruebe la conexión e inténtelo de nuevo. Sus conteos locales permanecen guardados.':namedMode?'Ingresa con el usuario y la contraseña que te asignó administración.':firstSetup?(ownerVerified?'El acceso de contador está disponible. Identidad propietaria verificada: seleccione administración para crear su contraseña.':'El acceso de contador está disponible con el nombre. La activación administrativa requiere verificar la cuenta propietaria una sola vez.'):'El personal entra con su nombre. El acceso administrativo requiere la contraseña compartida.';
+ const roleHtml=serverUnknown||namedMode?'':'<div class="field"><label for="login-role">Tipo de acceso</label><select id="login-role" name="role"><option value="counter">Entrar como contador</option><option value="admin">Entrar como administrador</option></select></div>';
+ const passwordHtml=namedMode?'<div class="field"><label for="login-password">Contraseña</label><input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="256" required></div>':firstSetup?(ownerVerified?'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256"></div></div>':''):'<div id="admin-credentials" hidden><div class="field"><label for="login-password">Contraseña administrativa</label><input id="login-password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="256"></div></div>';
+ const identityHtml=namedMode?'<div class="field"><label for="login-username">Usuario</label><input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required></div>':'<div class="field"><label for="login-name">Tu nombre</label><input id="login-name" name="name" autocomplete="name" required maxlength="80" placeholder="Nombre y apellidos" value="'+esc(activationName)+'"></div>';
  const actionHtml=serverUnknown?'':'<button id="login-submit" class="button primary" type="submit">Entrar al inventario →</button>'+(firstSetup&&!ownerVerified?'<button id="owner-verify" class="button primary" type="button" data-action="send-owner-activation" hidden>Verificar cuenta propietaria →</button>':'');
  const offlineHtml=offlineSession?'<div class="offline-resume">'+button('Continuar como '+esc(offlineSession.user.name),'resume','','')+'<p class="small muted" style="margin-top:10px">Continúa con el catálogo descargado y los registros pendientes de este dispositivo.</p></div>':'';
- $('#app').innerHTML='<div class="login"><section class="login-hero" aria-label="Identidad del Club de Golf de Panamá"><div class="login-hero-green"><div class="login-hero-copy"><img class="club-hero-logo" src="./logo-cgp-formal.svg" alt="Club de Golf de Panamá"></div><div class="login-hero-title"><span>CONTEO DE</span> <strong>INVENTARIO</strong></div><div class="login-wave" aria-hidden="true"><svg class="login-wave-layer login-wave-back" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V82C150 82 350 98 500 98C650 98 850 82 1000 82C1150 82 1350 98 1500 98C1650 98 1850 82 2000 82V0Z"></path></svg><svg class="login-wave-layer login-wave-front" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V82C150 82 350 98 500 98C650 98 850 82 1000 82C1150 82 1350 98 1500 98C1650 98 1850 82 2000 82V0Z"></path></svg></div></div><div class="login-photo-placeholder"><img class="login-photo" src="./mari-club-photo.jpg" alt="Campo de golf del Club de Golf de Panamá"></div></section><main class="login-main"><div class="login-form"><header class="login-access-header"><img class="mari-logo" src="./mari-logo.svg" alt="Mari" width="466" height="320"><div class="login-access-heading"><h2>'+(serverUnknown?'Servidor no disponible':'Iniciar sesión')+'</h2><span class="badge '+(state.offlineReady?'green':'amber')+'">'+(state.offlineReady?'Offline listo':'Offline no preparado')+'</span></div></header><p>'+status+'</p><form id="login-form"'+(serverUnknown?' hidden':'')+'>'+roleHtml+'<div class="field"><label for="login-name">Tu nombre</label><input id="login-name" name="name" autocomplete="name" required maxlength="80" placeholder="Nombre y apellidos" value="'+esc(activationName)+'"></div>'+passwordHtml+actionHtml+'</form>'+(serverUnknown?'<button class="button primary" type="button" data-action="reload">Reintentar conexión →</button>':'')+offlineHtml+'<p class="footnote">'+(serverUnknown?'Vuelva a intentar cuando haya conexión. No se han eliminado los datos de este navegador.':firstSetup?'El acceso de contador no requiere código ni autorización individual. La administración se activa con la cuenta propietaria verificada.':'Los contadores ingresan con su nombre; este no otorga permisos administrativos.')+' Mantén este navegador para conservar la sesión y sincronizar registros pendientes.</p></div></main></div>';
+ $('#app').innerHTML='<div class="login"><section class="login-hero" aria-label="Identidad del Club de Golf de Panamá"><div class="login-hero-green"><div class="login-hero-copy"><img class="club-hero-logo" src="./logo-cgp-formal.svg" alt="Club de Golf de Panamá"></div><div class="login-hero-title"><span>CONTEO DE</span> <strong>INVENTARIO</strong></div><div class="login-wave" aria-hidden="true"><svg class="login-wave-layer login-wave-back" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V82C150 82 350 98 500 98C650 98 850 82 1000 82C1150 82 1350 98 1500 98C1650 98 1850 82 2000 82V0Z"></path></svg><svg class="login-wave-layer login-wave-front" viewBox="0 0 2000 100" preserveAspectRatio="none"><path fill="currentColor" d="M0 0V82C150 82 350 98 500 98C650 98 850 82 1000 82C1150 82 1350 98 1500 98C1650 98 1850 82 2000 82V0Z"></path></svg></div></div><div class="login-photo-placeholder"><img class="login-photo" src="./mari-club-photo.jpg" alt="Campo de golf del Club de Golf de Panamá"></div></section><main class="login-main"><div class="login-form"><header class="login-access-header"><img class="mari-logo" src="./mari-logo.svg" alt="Mari" width="466" height="320"><div class="login-access-heading"><h2>'+(serverUnknown?'Servidor no disponible':'Iniciar sesión')+'</h2><span class="badge '+(state.offlineReady?'green':'amber')+'">'+(state.offlineReady?'Offline listo':'Offline no preparado')+'</span></div></header><p>'+status+'</p><form id="login-form"'+(serverUnknown?' hidden':'')+'>'+roleHtml+identityHtml+passwordHtml+actionHtml+'</form>'+(serverUnknown?'<button class="button primary" type="button" data-action="reload">Reintentar conexión →</button>':'')+offlineHtml+'<p class="footnote">'+(serverUnknown?'Vuelva a intentar cuando haya conexión. No se han eliminado los datos de este navegador.':namedMode?'La sesión se conserva en este navegador sin vencer por inactividad.':firstSetup?'El acceso de contador no requiere código ni autorización individual. La administración se activa con la cuenta propietaria verificada.':'Los contadores ingresan con su nombre; este no otorga permisos administrativos.')+' Mantén este navegador para conservar la sesión y sincronizar registros pendientes.</p></div></main></div>';
  const role=$('#login-role'),credentials=$('#admin-credentials');
  const updateRole=()=>{const isAdmin=!!role&&role.value==='admin';if(credentials)credentials.hidden=!isAdmin;const password=$('#login-password');if(password)password.required=isAdmin&&(!firstSetup||ownerVerified);const submit=$('#login-submit'),verify=$('#owner-verify');if(submit){submit.hidden=firstSetup&&!ownerVerified&&isAdmin;submit.textContent=firstSetup&&isAdmin?'Crear contraseña administrativa →':'Entrar al inventario →'}if(verify)verify.hidden=!isAdmin};
  if(role){role.addEventListener('change',updateRole);updateRole()}
@@ -1681,6 +1810,10 @@ function finishDevice(){
   });
 }
 const actions={
+ accounts:()=>openAccounts(),
+ 'create-account':()=>createAccountDialog(),
+ 'account-password':el=>changeAccountPassword(el.dataset.username),
+ 'account-status':el=>changeAccountStatus(el.dataset.username),
  reload:()=>location.reload(),
  'send-owner-activation':async()=>{if(!cloud)throw new Error('La verificación requiere conexión.');const name=String($('#login-name')?.value||'').trim();if(!name)throw new Error('Escriba su nombre para continuar.');await put('owner_activation_name',name);state.cloudAuth=await cloudIdentity();await api('/admin/activation-link',{});toast('Se envió un enlace al correo de la cuenta propietaria. Ábralo para continuar con la activación.');},
  'recount-item':el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');if(!canCount())throw new Error('Reanude el dispositivo en la hoja antes de registrar un recuento.');const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');dialog('Proponer recuento completo',`<p class="section-caption">${esc(product.name)} · ${esc(product.presentation)}. Este recuento queda pendiente; solo reemplaza los parciales si administración lo acepta explícitamente.</p><div class="field"><label for="recount-quantity">Cantidad física completa</label><input id="recount-quantity" name="quantity" inputmode="decimal" required></div>`,'Guardar propuesta',async fd=>{const q=decimal(fd.get('quantity'));const zero=Number(q)===0;if(zero&&!confirm('¿Confirma físicamente la cantidad cero?'))return;await queueSheetCount(product,q,{kind:'recount',zero_confirmed:zero});await sync();$('#modal').close();await navigate('consolidation');});},
@@ -1693,7 +1826,7 @@ const actions={
  'cloud-connect':()=>{if(!cloud)throw new Error('El panel QR solo está disponible en la instalación Pages.');location.href='/conectar-cloud.html'},
  'site-access':()=>{const q=qrcode(0,'M');q.addData(location.origin+location.pathname);q.make();dialog('QR opcional de acceso',`<div class="qr-private"><img alt="Código QR opcional para abrir Inventario Físico" src="${q.createDataURL(8,4)}"><p>Este QR solo abre la aplicación. No concede permisos ni reemplaza la identificación del empleado.</p></div>`,'Cerrar',null)},
  'refresh-catalog':async()=>{requireOnline();if(!await fetchScopeCatalog(warehouseScope()))return;if(state.page==='count')SmartSheet.refresh();toast('Catálogo actualizado: '+state.catalog.length+' presentaciones.');},
- 'renew-session':()=>{if(!state.online||!navigator.onLine)throw new Error('Conéctate para revalidar la sesión. Los conteos pendientes se conservan en este navegador.');const admin=!!state.session.user.admin;dialog(admin?'Renovar sesión administrativa':'Revalidar sesión de contador',admin?'<div class="field"><label for="reauth-secret">Contraseña administrativa</label><input id="reauth-secret" name="secret" type="password" autocomplete="current-password" required></div>':'<p class="section-caption">Vuelva a entrar con su nombre desde este navegador.</p>','Revalidar',async fd=>{const cloudAuth=state.session.cloudAuth;const role=admin?'admin':'counter';const result=await api('/login',{name:state.session.user.name,device_id:state.session.user.device_id,role,password:admin?fd.get('secret'):undefined});state.session={...result,...(cloudAuth?{cloudAuth}:{}),expired:false};await put('session',state.session);await refresh(true);$('#modal').close();render();await sync();toast('Sesión revalidada. Los registros conservan su contador original.')});},
+ 'renew-session':()=>{if(state.session.user.username)return reauthenticateAccount();if(!state.online||!navigator.onLine)throw new Error('Conéctate para revalidar la sesión. Los conteos pendientes se conservan en este navegador.');const admin=!!state.session.user.admin;dialog(admin?'Renovar sesión administrativa':'Revalidar sesión de contador',admin?'<div class="field"><label for="reauth-secret">Contraseña administrativa</label><input id="reauth-secret" name="secret" type="password" autocomplete="current-password" required></div>':'<p class="section-caption">Vuelva a entrar con su nombre desde este navegador.</p>','Revalidar',async fd=>{const cloudAuth=state.session.cloudAuth;const role=admin?'admin':'counter';const result=await api('/login',{name:state.session.user.name,device_id:state.session.user.device_id,role,password:admin?fd.get('secret'):undefined});state.session={...result,...(cloudAuth?{cloudAuth}:{}),expired:false};await put('session',state.session);await refresh(true);$('#modal').close();render();await sync();toast('Sesión revalidada. Los registros conservan su contador original.')});},
  'resolve-server-conflict':el=>dialog('Resolver conflicto del servidor','<p class="section-caption">La operación rechazada no se aplica al resultado. Tras confirmar esta resolución, el contador podrá crear una corrección nueva sobre la revisión actual.</p><div class="field"><label for="server-conflict-reason">Motivo de la resolución</label><textarea id="server-conflict-reason" name="reason" minlength="5" required></textarea></div>','Resolver conflicto',async fd=>{await adminMutation('/conflicts/resolve',{operation_id:el.dataset.operation,reason:fd.get('reason')},'Conflicto resuelto con constancia.');$('#modal').close();await navigate('consolidation')}),
  'new-article':()=>{if(!state.period||!state.warehouse)throw new Error('Abre primero la bodega donde agregarás el artículo.');dialog('Agregar artículo sin referencia',`<p class="section-caption">Bodega ${esc(state.warehouse)} · ${esc(periodName())}. Este artículo aparecerá en el reporte de artículos nuevos.</p><div class="field"><label for="article-code">Código</label><input id="article-code" name="code" required maxlength="80"></div><div class="field"><label for="article-name">Nombre del artículo</label><input id="article-name" name="name" required maxlength="150"></div><div class="row"><div class="field"><label for="article-presentation">Presentación</label><input id="article-presentation" name="presentation" required maxlength="80"></div><div class="field"><label for="article-cost">Costo unitario</label><input id="article-cost" name="cost" inputmode="decimal" placeholder="Opcional"></div></div>`,'Agregar al catálogo',async fd=>{const body={period_id:state.period,warehouse:state.warehouse,code:String(fd.get('code')).trim(),name:String(fd.get('name')).trim(),presentation:String(fd.get('presentation')).trim()};if(String(fd.get('cost')).trim())body.cost=decimal(fd.get('cost'));await adminMutation('/articles',body,'Artículo agregado al catálogo de esta bodega.');await loadScope();$('#modal').close();render()})},
  'modal-close':()=>$('#modal').close(),
@@ -1716,8 +1849,8 @@ const actions={
   'import-changes':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');requireOnline();const result=await api('/import/changes?import_id='+encodeURIComponent(el.dataset.id));const x=result.import;dialog('Auditoría de actualización XLS',`<p class="section-caption">${esc(x.warehouse)} · ${esc(x.filename)}<br>${esc(x.administrator)} · ${esc(new Date(x.at).toLocaleString('es-PA'))}<br>SHA-256 ${esc(x.sha256)}</p>${result.changes.length?result.changes.map(c=>`<div class="history-line"><strong>${esc(c.code)} · ${esc(c.presentation)} · ${esc(c.change_kind)}</strong><br><span class="small">Anterior: ${esc(JSON.stringify(c.old_values||{}))}</span><br><span class="small">Nuevo: ${esc(JSON.stringify(c.new_values||{}))}</span><br><span class="muted small">${esc(new Date(c.at).toLocaleString('es-PA'))}</span></div>`).join(''):'<p class="muted small">No hubo cambios de artículos. La importación quedó registrada sin duplicar el catálogo ni los conteos.</p>'}`)},
  'resolve-op':el=>resolveOperation(el.dataset.id),
  'record-history':el=>{const r=state.records.find(x=>x.id===el.dataset.id);dialog('Historial del registro',`<p class="section-caption">${esc(r.name||r.code)} · cantidad efectiva ${esc(r.quantity)} · revisión ${r.revision||0}</p>${r.history?.length?r.history.map(h=>`<div class="history-line"><strong>${esc(h.old_quantity??h.previous_quantity??'Original')} → ${esc(h.new_quantity??h.quantity??'')}</strong><br>${esc(h.reason||'Registro inicial')}<br><span class="muted small">${esc(h.name||h.owner_name||'')} · ${esc(h.at||h.created_at||'')}${h.local?' · guardado local':''}</span></div>`).join(''):'<p class="muted small">Registro original sin correcciones.</p>'}<div class="divider"></div><p class="small muted">Identificador ${esc(r.id)}</p>`)},
- identity:()=>dialog('Tu identificación',`<p class="section-caption">${esc(state.session.user.name)} · ${state.session.user.admin?'Administración':'Contador'}</p>${pending().length?notice('Hay '+pending().length+' operaciones pendientes en este dispositivo. Conserva la identificación actual para sincronizarlas.','amber'):''}<div class="stack">${!state.session.user.admin?button('Acceso administrativo','elevate','','primary'):''}${button('Cerrar sesión','logout','','danger')}${button('Instalar / añadir a inicio','install')}</div>`),
- logout:()=>dialog('Cerrar sesión',pending().length?`<p class="section-caption">Se intentará sincronizar primero. Si quedan operaciones pendientes o conflictos, la sesión se mantendrá abierta para conservar la autoría y permitir reintentar.</p>${notice(pending().length+' operaciones pendientes en este dispositivo.','amber')}`:'<p class="section-caption">Se cerrará la sesión en este dispositivo.</p>','Cerrar sesión',async()=>{if(pending().length){if(!state.online||state.session.expired)throw new Error('Conéctate y sincroniza los conteos pendientes antes de cerrar la sesión.');await sync();await loadQueue();if(pending().length)throw new Error('La sesión sigue abierta para conservar '+pending().length+' operaciones pendientes o conflictos. Revisa Mis registros y vuelve a intentarlo.')}let revoked=false;if(state.online&&!state.session.expired){try{await api('/logout',{});revoked=true}catch{}if(cloud){try{await fetch(`${cloud.url}/auth/v1/logout`,{method:'POST',headers:{apikey:cloud.publishableKey,Authorization:'Bearer '+state.session.token}})}catch{}}}await del('cloud_auth');await del('session');if($('#modal').open)$('#modal').close();state.session=null;state.data=null;setWarehouseScope(null,null);state.page='periods';render();toast(revoked?'Sesión cerrada.':'Sesión cerrada en este dispositivo.') }),
+ identity:()=>dialog('Tu identificación',`<p class="section-caption">${esc(state.session.user.name)} · ${state.session.user.admin?'Administración':'Contador'}</p>${pending().length?notice('Hay '+pending().length+' operaciones pendientes en este dispositivo. Conserva la identificación actual para sincronizarlas.','amber'):''}<div class="stack">${!state.session.user.admin&&!state.session.user.username&&!state.accountsEnabled?button('Acceso administrativo','elevate','','primary'):''}${button('Cerrar sesión','logout','','danger')}${button('Instalar / añadir a inicio','install')}</div>`),
+ logout:()=>dialog('Cerrar sesión',pending().length?`<p class="section-caption">Se intentará sincronizar primero. Si quedan operaciones pendientes o conflictos, la sesión se mantendrá abierta para conservar la autoría y permitir reintentar.</p>${notice(pending().length+' operaciones pendientes en este dispositivo.','amber')}`:'<p class="section-caption">Se cerrará la sesión en este dispositivo.</p>','Cerrar sesión',async()=>{if(pending().length){if(!state.online||state.session.expired)throw new Error('Conéctate y sincroniza los conteos pendientes antes de cerrar la sesión.');await sync();await loadQueue();if(pending().length)throw new Error('La sesión sigue abierta para conservar '+pending().length+' operaciones pendientes o conflictos. Revisa Mis registros y vuelve a intentarlo.')}let revoked=false;if(state.online&&!state.session.expired){try{await api('/logout',{});revoked=true}catch{}if(cloud&&!state.session.user.username){try{await fetch(`${cloud.url}/auth/v1/logout`,{method:'POST',headers:{apikey:cloud.publishableKey,Authorization:'Bearer '+state.session.token}})}catch{}}}await del('cloud_auth');await del('session');if($('#modal').open)$('#modal').close();state.session=null;state.cloudAuth=null;state.accountList=null;state.data=null;setWarehouseScope(null,null);state.page='periods';render();toast(revoked?'Sesión cerrada.':'Sesión cerrada en este dispositivo.') }),
  resume:async()=>{state.session=await get('session');await restoreSession();render();if(state.online)refresh(true).then(()=>render()).catch(error=>toast(error.message,true))},
  elevate:()=>dialog('Acceso administrativo','<div class="field"><label for="admin-password">Contraseña administrativa compartida</label><input id="admin-password" name="password" type="password" autocomplete="current-password" required></div>','Acceder',async fd=>{requireOnline();const result=await api('/admin',{password:fd.get('password')});if(result.token)state.session.token=result.token;if(result.user)state.session.user=result.user;await refresh(true);$('#modal').close();state.page='admin';render();toast('Acceso administrativo habilitado.')}),
  'new-period':()=>{const now=new Date();dialog('Preparar inventario mensual',`<div class="row"><div class="field"><label for="period-month">Mes</label><select id="period-month" name="month">${months.map((m,i)=>`<option value="${i+1}" ${i===now.getMonth()?'selected':''}>${m}</option>`).join('')}</select></div><div class="field"><label for="period-year">Año</label><input type="number" id="period-year" name="year" value="${now.getFullYear()}" min="2000" max="2200" required></div></div>`,'Crear período',async fd=>{const r=await adminMutation('/periods',{month:Number(fd.get('month')),year:Number(fd.get('year'))},'Período creado.');setWarehouseScope(r.id,null);state.page='warehouses';$('#modal').close();render()})},
@@ -1738,7 +1871,45 @@ const actions={
 };
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el||el.disabled)return;const fn=actions[el.dataset.action];if(!fn)return;try{await fn(el)}catch(error){toast(error.message,true)}});
 document.addEventListener('input',e=>{if(e.target.id==='record-search'){const q=e.target.value.toLocaleLowerCase();$('#record-results').innerHTML=recordsHTML(effectiveRecords().filter(r=>[r.name,r.code,r.owner_name,r.zone].join(' ').toLocaleLowerCase().includes(q)))}});
- document.addEventListener('submit',async e=>{if(e.target.id==='count-form'){e.preventDefault();const b=$('button[type=submit]',e.target);b.disabled=true;try{await saveCount(new FormData(e.target))}catch(error){toast(error.message,true)}finally{if(b.isConnected)b.disabled=!canCount()}}if(e.target.id==='login-form'){e.preventDefault();const b=$('button[type=submit]',e.target);b.disabled=true;try{const fd=new FormData(e.target);const role=String(fd.get('role')||'counter');let deviceId=await get('device_id');if(!deviceId){deviceId=uid();await put('device_id',deviceId)}if(cloud)state.cloudAuth=await cloudIdentity();const result=await api('/login',{name:String(fd.get('name')).trim(),device_id:deviceId,role,password:role==='admin'?fd.get('password')||undefined:undefined});if(cloud){result.cloudAuth=state.cloudAuth;await put('cloud_auth',state.cloudAuth);state.cloudAuth=null}await del('owner_activation_name');state.session=result;state.session.expired=false;await put('session',state.session);await restoreSession();await refresh(true);render();if(state.online)sync().catch(()=>{})}catch(error){state.cloudAuth=null;toast(error.message,true)}finally{if(b.isConnected)b.disabled=false}}});
+document.addEventListener('submit',async event=>{
+  const form=event.target;
+  if(form.id==='count-form'){
+    event.preventDefault();
+    const submit=$('button[type=submit]',form);
+    submit.disabled=true;
+    try{await saveCount(new FormData(form));}
+    catch(error){toast(error.message,true);}
+    finally{if(submit.isConnected)submit.disabled=!canCount();}
+  }
+  if(form.id!=='login-form')return;
+  event.preventDefault();
+  const submit=$('button[type=submit]',form);
+  submit.disabled=true;
+  try{
+    const fields=new FormData(form);
+    const device=await getDeviceId();
+    if(fields.has('username')){
+      const result=await requestApi('/account/login',{username:String(fields.get('username')).trim(),password:fields.get('password'),device_id:device});
+      await saveNamedSession(result);
+    }else{
+      const role=String(fields.get('role')||'counter');
+      if(cloud)state.cloudAuth=await cloudIdentity();
+      const result=await api('/login',{name:String(fields.get('name')).trim(),device_id:device,role,password:role==='admin'?fields.get('password')||undefined:undefined});
+      if(cloud){result.cloudAuth=state.cloudAuth;await put('cloud_auth',state.cloudAuth);state.cloudAuth=null;}
+      await del('owner_activation_name');
+      state.session={...result,expired:false};
+      await put('session',state.session);
+    }
+    await restoreSession();
+    await refresh(true);
+    render();
+    if(state.online)sync().catch(()=>{});
+  }catch(error){
+    state.cloudAuth=null;
+    toast(error.message,true);
+    if(error.code==='accounts_required')renderLogin();
+  }finally{if(submit.isConnected)submit.disabled=false;}
+});
 async function restoreSession(){
   const owner=state.session.user.id;
   state.data=await get('snapshot:'+owner)||{user:state.session.user,periods:[],warehouses:[],imports:[],config:{}};
