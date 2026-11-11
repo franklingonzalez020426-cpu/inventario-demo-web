@@ -650,17 +650,18 @@ const SmartSheet = (() => {
     if(document.activeElement?.closest('.sheet-entry'))ensureVisible(document.activeElement);
   }));
   function nodeFor(p,index) {
+    const rowScope=warehouseScope();
     const row=document.createElement('div');row.className='sheet-row';row.setAttribute('role','row');
     const admin=!!state.session.user.admin;
     row.innerHTML=`<span class="sheet-code" role="cell">${esc(p.code)}</span><div class="sheet-description" role="cell"><strong>${esc(p.name)}</strong><span class="mobile-meta">${esc(p.code)} · ${esc(p.presentation)}</span>${p.is_new?'<small class="new-mark">Artículo nuevo</small>':''}${p.missing_from_latest_import?'<small class="missing-import-mark">Ausente en la última importación · revisar</small>':''}<details><summary>Mis registros</summary><div class="sheet-records"></div></details></div><span class="sheet-presentation" role="cell">${esc(p.presentation)}</span>${admin?'<span class="sheet-admin-existence" role="cell"></span>':''}<div class="sheet-cell" role="cell"><form><label class="sr-only" for="sheet-qty-${index}">Cantidad de ${esc(p.name)}, ${esc(p.presentation)}</label><div class="sheet-entry"><input id="sheet-qty-${index}" inputmode="decimal" enterkeyhint="go" autocomplete="off" aria-describedby="sheet-status-${index}"><button class="sheet-save" aria-label="Guardar cantidad de ${esc(p.name)}" type="submit" hidden>✓</button><button class="sheet-add" type="button" aria-label="Agregar otro conteo de ${esc(p.name)}" hidden>+</button></div><span class="sheet-row-status" id="sheet-status-${index}"></span></form></div>`;
     const input=row.querySelector('input'),save=row.querySelector('.sheet-save'),add=row.querySelector('.sheet-add');
     const entry={row,input,save,add,p,draft:'',editing:false,busy:false,stamp:''};
-    input.addEventListener('input',()=>{entry.editing=true;entry.draft=input.value;input.setAttribute('aria-invalid','false');save.hidden=!input.value.trim();put(draftKey(p),{value:input.value}).catch(e=>toast(e.message,true));});
+    input.addEventListener('input',()=>{entry.editing=true;entry.draft=input.value;input.setAttribute('aria-invalid','false');save.hidden=!input.value.trim();saveSheetDraft(rowScope,itemKey(p),input.value).catch(e=>toast(e.message,true));});
     input.addEventListener('focus',()=>ensureVisible(input));
     add.addEventListener('click',()=>{entry.editing=true;entry.draft='';input.readOnly=false;input.value='';add.hidden=true;input.focus({preventScroll:true});ensureVisible(input);});
     row.querySelector('details').addEventListener('toggle',()=>updateRow(entry));
     const commit=async mode=>{
-      if(entry.busy||input.readOnly||!input.value.trim())return false;
+      if(!sameWarehouseScope(rowScope)||entry.busy||input.readOnly||!input.value.trim())return false;
       entry.busy=true;save.disabled=true;input.disabled=true;
       try {
         const q=decimal(input.value);let zero=false;
@@ -734,15 +735,23 @@ function makeSheetCount(product, quantity, options={}) {
   const recordId=uid(),at=new Date().toISOString(),kind=options.kind||'count';
   const code=kind==='new_article'?'NUEVO-'+recordId:product.code;
   const operation={id:uid(),record_id:recordId,kind,period_id:state.period,warehouse:state.warehouse,code,name:product.name,presentation:product.presentation,quantity:decimal(quantity),zero_confirmed:options.zero_confirmed===true,zone:'',revision:0,reason:'',created:at,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,status:'pending'};
+  if(options.only_if_missing===true)operation.only_if_missing=true;
   const record={...operation,id:recordId,kind,status:kind==='recount'?'pending':'effective',revision:1,history:[],synced:false,created_at:at,updated_at:at,is_new:kind==='new_article'||product.is_new};record.local_key=recordKey(record);
   return {operation,record};
 }
 async function queueSheetCount(product, quantity, options={}) {
+  const scope=warehouseScope();
   if(!canCount())throw new Error('Prepare el dispositivo con conexión antes de contar.');
   const {operation,record}=makeSheetCount(product,quantity,options);
   const {code,kind}=operation;
   await saveQueuedOperations([operation],[record],options.draft_key?[options.draft_key]:[]);
-  state.records.unshift(record);if(kind==='new_article'){state.catalog.push({code,name:product.name,presentation:product.presentation,is_new:1});await put(catalogKey(),{rows:state.catalog});}
+  if(sameWarehouseScope(scope)){
+    state.records.unshift(record);
+    if(kind==='new_article'){
+      state.catalog.push({code,name:product.name,presentation:product.presentation,is_new:1});
+      await put(catalogKey(scope),{rows:state.catalog});
+    }
+  }
   await loadQueue();toast('Conteo guardado en el dispositivo.');
   if(state.online)sync().catch(()=>{});
   return record;
@@ -766,8 +775,7 @@ function missingWithoutPending(consolidation){
   return consolidation.rows.filter(row=>row.quantity==null&&!blocked.has(missingItemKey(row)));
 }
 function isMissingBatchScope(scope){
-  return state.session?.user.admin&&state.session.user.id===scope.owner&&
-    String(state.period)===String(scope.period)&&state.warehouse===scope.warehouse;
+  return scope.admin&&sameWarehouseScope(scope);
 }
 function requireMissingBatchScope(scope){
   if(!isMissingBatchScope(scope))throw new Error('Vuelva a abrir la revisión de faltantes de esta bodega.');
@@ -786,8 +794,9 @@ async function readMissingBatch(scope){
   const values=await Promise.all(candidates.map(row=>idbRequest(drafts.get(prefix+missingItemKey(row)))));
   return candidates.filter((row,index)=>!String(values[index]?.value??'').trim());
 }
+const activeZeroBatches=new Map();
 async function confirmMissingBatch(){
-  const scope={period:state.period,warehouse:state.warehouse,owner:state.session?.user.id};
+  const scope=warehouseScope();
   const listed=await readMissingBatch(scope);
   if($('#modal').open)return;
   if(!listed.length){
@@ -808,7 +817,7 @@ async function confirmMissingBatch(){
     const rows=(await readMissingBatch(scope)).filter(row=>listedKeys.has(missingItemKey(row)));
     requireMissingBatchScope(scope);
     const batchId=uid();
-    const entries=rows.map(row=>makeSheetCount(row,'0',{zero_confirmed:true}));
+    const entries=rows.map(row=>makeSheetCount(row,'0',{zero_confirmed:true,only_if_missing:true}));
     for(const {operation} of entries)operation.zero_batch_id=batchId;
     const saved=entries.length?await saveQueuedOperations(entries.map(entry=>entry.operation),entries.map(entry=>entry.record)):[];
     modal.close();
@@ -820,17 +829,21 @@ async function confirmMissingBatch(){
     const savedIds=new Set(saved.map(op=>op.id));
     const savedRecords=entries.filter(entry=>savedIds.has(entry.operation.id)).map(entry=>entry.record);
     if(isMissingBatchScope(scope))state.records=[...savedRecords,...state.records];
+    const skippedByServer=new Set();
+    activeZeroBatches.set(batchId,skippedByServer);
     await loadQueue();
     if(state.page==='missing'&&isMissingBatchScope(scope))render();
     toast(`${saved.length} ${saved.length===1?'cero guardado':'ceros guardados'}. Enviando al servidor…`);
-    if(syncRun)await syncRun.catch(()=>{});
-    if(state.session?.user.id===scope.owner)await sync().catch(()=>{});
+    try{
+      if(syncRun)await syncRun.catch(()=>{});
+      if(state.session?.user.id===scope.owner)await sync().catch(()=>{});
+    }finally{activeZeroBatches.delete(batchId);}
     await loadQueue();
     const outstanding=pending().filter(op=>savedIds.has(op.id));
     const blocked=outstanding.filter(op=>['error','conflict'].includes(op.status)&&!autoRecoverableQueued(op)).length;
     const waiting=outstanding.length-blocked;
-    const confirmed=saved.length-outstanding.length;
-    const skipped=listed.length-saved.length;
+    const confirmed=saved.length-outstanding.length-skippedByServer.size;
+    const skipped=listed.length-saved.length+skippedByServer.size;
     if(isMissingBatchScope(scope)&&state.page==='missing'&&state.online){
       try{
         const latest=await api('/consolidation?period_id='+encodeURIComponent(scope.period)+'&warehouse='+encodeURIComponent(scope.warehouse));
@@ -863,12 +876,12 @@ function renderMissing(){
 }
 
 function renderAdmin(){
-  if(!state.session.user.admin)return renderAdminLegacy();
+  if(!state.session.user.admin)return renderAdminSettings();
   const warehouses=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));
   return header('Supervisión del inventario',state.period?periodName():'Seleccione un período mensual.',button('Auditoría','audit')+button('Importar XLS','import','','primary'))+
     (!state.online?notice('Información de la última consulta. Verifique con el servidor antes de cerrar.','amber'):'')+
     `<div class="table-wrap"><table><thead><tr><th>Bodega</th><th>Estado</th><th>Con registro</th><th>Sin resolver</th><th>Dispositivos</th><th>Revisión</th></tr></thead><tbody>${warehouses.map(w=>`<tr><td class="wrap"><b>${esc(w.code)}</b><br>${esc(w.name)}</td><td>${statusBadge(w.status)}</td><td>${esc(w.counted_count??'—')}</td><td>${Math.max(0,Number(w.items_count||0)-Number(w.counted_count||0))}</td><td>${(w.participants||[]).filter(p=>!p.finished).length} en conteo / ${(w.participants||[]).length} registrados</td><td><div class="actions">${button('Resultados','admin-scope',`data-code="${esc(w.code)}" data-page="consolidation"`,'small')}${button('Faltantes','admin-scope',`data-code="${esc(w.code)}" data-page="missing"`,'small')}${button('Reportes y firmas','admin-scope',`data-code="${esc(w.code)}" data-page="reports"`,'small')}</div></td></tr>`).join('')||'<tr><td colspan="6">Sin bodegas en el período seleccionado.</td></tr>'}</tbody></table></div><div class="divider"></div>`+
-    renderAdminLegacy();
+    renderAdminSettings();
 }
 function renderAudit(){
   if(!state.session.user.admin)return notice('Acceso administrativo requerido.','amber');
@@ -877,16 +890,21 @@ function renderAudit(){
 }
 
 // Upgrade cached catalogs without touching count records or pending operations.
-async function cachedCatalog(){
- const cached=await get(catalogKey());
- if(cached)return cleanCatalog(cached.rows||[]);
- const legacy=await get('catalog:'+key());
- if(!legacy)return [];
- const rows=cleanCatalog(legacy.rows||[]);await put(catalogKey(),{rows});return rows;
+async function cachedCatalog(scope=warehouseScope()){
+  const cached=await get(catalogKey(scope));
+  if(cached)return cleanCatalog(cached.rows||[],scope.admin);
+  const legacy=await get('catalog:'+key(scope.period,scope.warehouse));
+  if(!legacy)return [];
+  const rows=cleanCatalog(legacy.rows||[],false);
+  await put(catalogKey(scope),{rows});
+  return rows;
 }
 async function migrateCatalogPrivacy(){
- const keys=await idbRequest(db.transaction('kv').objectStore('kv').getAllKeys());
- for(const k of keys.filter(k=>typeof k==='string'&&k.startsWith('catalog:'))){const cached=await get(k);if(cached?.rows?.some(r=>Object.keys(r).some(k=>!['code','name','presentation','is_new'].includes(k))))await put(k,{rows:cleanCatalog(cached.rows)});}
+  const keys=await idbRequest(db.transaction('kv').objectStore('kv').getAllKeys());
+  for(const storageKey of keys.filter(value=>typeof value==='string'&&/^catalog:[^:]+:(?:[^:]+|(?:CLUB|ADCOSA):[^:]+)$/.test(value))){
+    const cached=await get(storageKey);
+    if(cached?.rows?.some(row=>'cost' in row||'theoretical' in row))await put(storageKey,{rows:cleanCatalog(cached.rows,false)});
+  }
 }
 
 ;'use strict';
@@ -961,8 +979,35 @@ async function saveQueuedOperations(operations,records=[],draftKeys=[]){
 async function migrateOperationSequence(){return new Promise((resolve,reject)=>{const t=db.transaction(['kv','operations'],'readwrite');t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error);const store=t.objectStore('operations'),kv=t.objectStore('kv'),request=store.getAll();request.onsuccess=()=>{const rows=request.result;const counter=kv.get('operationSequence');counter.onsuccess=()=>{let value=rows.reduce((maximum,o)=>Math.max(maximum,Number.isSafeInteger(o.sequence)?o.sequence:0),Number(counter.result)||0);const groups=new Map();for(const op of rows){const id=op.record_id||op.id;groups.set(id,[groups.get(id),op.created||''].filter(x=>x!==undefined).sort()[0]);}rows.filter(o=>!Number.isSafeInteger(o.sequence)).sort((a,b)=>{const ga=a.record_id||a.id,gb=b.record_id||b.id;return String(groups.get(ga)).localeCompare(String(groups.get(gb)))||ga.localeCompare(gb)||Number(a.kind==='correct')-Number(b.kind==='correct')||(Number(a.revision)||0)-(Number(b.revision)||0)||String(a.created||'').localeCompare(String(b.created||''))||a.id.localeCompare(b.id)}).forEach(op=>{op.sequence=++value;store.put(op)});kv.put(value,'operationSequence');};};});}
 const operationOrder=(a,b)=>Number.isSafeInteger(a.sequence)&&Number.isSafeInteger(b.sequence)?a.sequence-b.sequence:String(a.created||'').localeCompare(String(b.created||''))||a.id.localeCompare(b.id);
 const key=(p=state.period,w=state.warehouse)=>`${p}:${w}`;
-const catalogKey=()=>`catalog:${state.session.user.id}:${key()}`;
-const cleanCatalog=rows=>rows.map(r=>Object.fromEntries(['code','name','presentation','is_new','theoretical','cost','missing_from_latest_import','last_import_at'].filter(k=>r[k]!==undefined).map(k=>[k,r[k]])));
+let warehouseRevision=0, navigationRevision=0;
+function warehouseScope(){
+  return {owner:state.session?.user.id,admin:!!state.session?.user.admin,period:state.period,warehouse:state.warehouse,revision:warehouseRevision};
+}
+function sameWarehouseScope(scope){
+  return !!scope.owner&&scope.owner===state.session?.user.id&&scope.admin===!!state.session?.user.admin&&
+    scope.revision===warehouseRevision&&scope.period===state.period&&scope.warehouse===state.warehouse;
+}
+function setWarehouseScope(period,warehouse){
+  warehouseRevision++;
+  Object.assign(state,{period,warehouse,scopeLoading:false,catalog:[],catalogVersion:null,records:[],consolidation:null,adminView:null,selected:null,query:'',finishing:false});
+  return warehouseScope();
+}
+const scopeQuery=scope=>'period_id='+encodeURIComponent(scope.period)+'&warehouse='+encodeURIComponent(scope.warehouse);
+const scopeStorageKey=(prefix,scope)=>`${prefix}:${scope.owner}:${key(scope.period,scope.warehouse)}`;
+const catalogKey=(scope=warehouseScope())=>scopeStorageKey('catalog',scope);
+const draftPrefix=scope=>scopeStorageKey('sheetdraft',scope)+':';
+const finishKey=scope=>scopeStorageKey('finish-lock',scope);
+const scopeWarehouse=scope=>state.data?.warehouses?.find(w=>String(w.period_id)===String(scope.period)&&w.code===scope.warehouse);
+const scopeParticipant=scope=>scopeWarehouse(scope)?.participants?.find(p=>p.session_id===scope.owner);
+function scopeReadOnly(scope){
+  const period=state.data?.periods?.find(p=>String(p.id)===String(scope.period));
+  return ['closed','cerrado'].includes(period?.status)||['closed','cerrado','signing','pending_signatures'].includes(scopeWarehouse(scope)?.status);
+}
+function cleanCatalog(rows,admin=!!state.session?.user.admin){
+  const fields=['code','name','presentation','is_new'];
+  if(admin)fields.push('theoretical','cost','missing_from_latest_import','last_import_at');
+  return rows.map(row=>Object.fromEntries(fields.filter(field=>row[field]!==undefined).map(field=>[field,row[field]])));
+}
 const recordKey=(r)=>`${r.period_id}:${r.warehouse}:${r.id}`;
 function pending(){return state.queue.filter(o=>!o.resolved)}
 function scopePending(p=state.period,w=state.warehouse){return pending().filter(o=>String(o.period_id)===String(p)&&o.warehouse===w)}
@@ -970,10 +1015,10 @@ function currentWarehouse(){return state.data?.warehouses?.find(w=>String(w.peri
 function currentPeriod(){return state.data?.periods?.find(p=>String(p.id)===String(state.period))}
 function periodName(p=currentPeriod()){return p?`${window.INVENTORY_DEVELOPMENT&&String(p.id).startsWith('DESARROLLO-')?'Validación · ':''}${months[Number(p.month)-1]} ${p.year}`:'Inventario mensual'}
 function isClosed(w=currentWarehouse()){return ['closed','cerrado'].includes(w?.status)||['closed','cerrado'].includes(currentPeriod()?.status)}
-function canCount(){return !state.finishing&&state.offlineReady&&!!state.joined[key()]&&!isClosed()&&!['signing','pending_signatures'].includes(currentWarehouse()?.status)}
+function canCount(){const scope=warehouseScope();const participant=scopeParticipant(scope);return !state.scopeLoading&&!state.finishing&&!participant?.finished&&!participant?.retired&&state.offlineReady&&!!state.joined[key()]&&!scopeReadOnly(scope);}
 function statusBadge(status){const s=String(status||'preparation');return `<span class="badge ${s==='closed'?'green':s==='counting'?'blue':s==='signing'||s==='pending_signatures'?'amber':''}">${esc(labels[s]||s)}</span>`}
 function notice(text,kind=''){return `<div class="notice ${kind}">${text}</div>`}
-function button(label,action,extra='',cls=''){return `<button class="button ${cls}" data-action="${action}" ${extra}>${label}</button>`}
+function button(label,action,extra='',cls=''){return `<button type="button" class="button ${cls}" data-action="${action}" ${extra}>${label}</button>`}
 function toast(message,error=false){const el=$('#toast');el.textContent=message;el.className='visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',error?7000:4200)}
 async function cloudRefresh(force=false){
  if(!cloud)return null;
@@ -1050,27 +1095,176 @@ async function api(path,body,opts={}){
  }
 }
 async function loadQueue(){state.queue=(await all('operations')).filter(o=>!o.resolved).sort(operationOrder)}
-async function refresh(silent=false){if(!state.session)return false;const sessionId=state.session.user.id;try{const data=await api('/state');if(!state.session||state.session.user.id!==sessionId)return false;state.data=data;state.session.expired=false;state.session.user=data.user;await put('session',state.session);await put('snapshot:'+data.user.id,data);if(state.period&&!data.periods.some(p=>String(p.id)===String(state.period))){state.period=null;state.warehouse=null}for(const w of data.warehouses||[]){const part=(w.participants||[]).find(p=>p.session_id===data.user.id);const k=key(w.period_id,w.code);if(part&&!part.finished&&!part.retired&&w.status!=='closed')state.joined[k]=true;else delete state.joined[k]}await put('joined:'+state.session.user.id,state.joined);if(!silent)render();return true}catch(e){if(!silent)toast(e.message,true);if((e.status===401||e.code==='counter_session_revoked')&&state.session?.user.id===sessionId){state.session.expired=true;await put('session',state.session)}if(!silent)render();return false}}
-async function ensureParticipation(periodId=state.period,warehouse=state.warehouse,force=false){
- const membershipKey=key(periodId,warehouse);
- if(state.joined[membershipKey]&&!force)return true;
- if(!state.online||!navigator.onLine)return false;
- if(!periodId||!warehouse)throw new Error('Seleccione una bodega disponible para contar.');
- if(joinRuns.has(membershipKey))return joinRuns.get(membershipKey);
- const run=(async()=>{
-  const result=await api('/join',{period_id:periodId,warehouse});
-  if(result?.ok!==true||result.session_id!==state.session?.user.id)throw new Error('No se pudo habilitar el conteo en esta bodega. Inténtelo cuando recupere conexión.');
-  state.joined[membershipKey]=true;await put('joined:'+state.session.user.id,state.joined);
-  await del(`finish-lock:${state.session.user.id}:${membershipKey}`);
-  state.finishing=false;
+async function refresh(silent=false){if(!state.session)return false;const sessionId=state.session.user.id;try{const data=await api('/state');if(!state.session||state.session.user.id!==sessionId)return false;state.data=data;state.session.expired=false;state.session.user=data.user;await put('session',state.session);await put('snapshot:'+data.user.id,data);if(state.period&&!data.periods.some(p=>String(p.id)===String(state.period))){setWarehouseScope(null,null);state.page='periods'}for(const w of data.warehouses||[]){const part=(w.participants||[]).find(p=>p.session_id===data.user.id);const k=key(w.period_id,w.code);if(part&&!part.finished&&!part.retired&&w.status!=='closed')state.joined[k]=true;else delete state.joined[k]}await put('joined:'+state.session.user.id,state.joined);if(!silent)render();return true}catch(e){if(!silent)toast(e.message,true);if((e.status===401||e.code==='counter_session_revoked')&&state.session?.user.id===sessionId){state.session.expired=true;await put('session',state.session)}if(!silent)render();return false}}
+async function ensureParticipation(periodId=state.period,warehouse=state.warehouse,force=false,resume=false){
+  const scope={...warehouseScope(),period:periodId,warehouse};
+  if(!scope.owner||!periodId||!warehouse)throw new Error('Seleccione una bodega disponible para contar.');
+  if(scopeReadOnly(scope))return false;
+  const lock=await get(finishKey(scope));
+  if(state.session?.user.id!==scope.owner)return false;
+  const participant=scopeParticipant(scope);
+  if(participant?.retired||(!resume&&(lock||participant?.finished)))return false;
+  const membership=key(periodId,warehouse);
+  if(state.joined[membership]&&!force&&!resume)return true;
+  if(!state.online||!navigator.onLine)return false;
+  const runKey=scopeStorageKey(resume?'resume':'join',scope);
+  if(joinRuns.has(runKey))return joinRuns.get(runKey);
+  const run=(async()=>{
+    let result;
+    try{result=await api('/join',{period_id:periodId,warehouse,...(resume?{resume:true}:{})});}
+    catch(error){if(error.code==='device_finished'&&!resume)return false;throw error;}
+    if(result?.ok!==true||result.session_id!==scope.owner)throw new Error('No se pudo habilitar el conteo en esta bodega.');
+    if(state.session?.user.id!==scope.owner)return false;
+    if(resume)await del(finishKey(scope));
+    if(!resume&&await get(finishKey(scope)))return false;
+    if(state.session?.user.id!==scope.owner)return false;
+    state.joined[membership]=true;
+    await put('joined:'+scope.owner,state.joined);
+    if(resume&&sameWarehouseScope(scope)){
+      state.finishing=false;
+      const current=scopeParticipant(scope);
+      if(current)current.finished=false;
+    }
+    return true;
+  })().finally(()=>joinRuns.delete(runKey));
+  joinRuns.set(runKey,run);
+  return run;
+}
+async function fetchScopeCatalog(scope){
+  const data=await api('/catalog?'+scopeQuery(scope));
+  if(!sameWarehouseScope(scope))return false;
+  const rows=cleanCatalog(data.rows||[],scope.admin);
+  await Promise.all([put(catalogKey(scope),{rows}),put(scopeStorageKey('catalog-version',scope),data.catalog_version)]);
+  if(!sameWarehouseScope(scope))return false;
+  state.catalog=rows;
+  state.catalogVersion=data.catalog_version;
   return true;
- })().finally(()=>joinRuns.delete(membershipKey));
- joinRuns.set(membershipKey,run);return run;
-}async function loadScope(){state.finishing=!!await get(`finish-lock:${state.session.user.id}:${key()}`);state.selected=null;state.query='';if(state.online&&!isClosed())await ensureParticipation();state.catalog=await cachedCatalog();state.catalogVersion=await get(`catalog-version:${state.session.user.id}:${key()}`);if(state.online){try{const c=await api('/catalog?period_id='+encodeURIComponent(state.period)+'&warehouse='+encodeURIComponent(state.warehouse));state.catalog=cleanCatalog(c.rows||[]);state.catalogVersion=c.catalog_version;await put(catalogKey(),{rows:state.catalog});await put(`catalog-version:${state.session.user.id}:${key()}`,state.catalogVersion)}catch(e){toast(e.message,true)}}await loadRecords();mergePendingArticles();state.adminView=state.session.user.admin?await loadAdminView():null;}
-async function loadRecords(){if(state.online){try{const result=await api('/records?period_id='+encodeURIComponent(state.period)+'&warehouse='+encodeURIComponent(state.warehouse));const queuedIds=new Set(scopePending().map(o=>o.record_id));await atomic(['records'],t=>{for(const r of result.records||[]){if(queuedIds.has(r.id))continue;const item={...r,period_id:state.period,warehouse:state.warehouse,local_key:recordKey({...r,period_id:state.period,warehouse:state.warehouse}),synced:true};t.objectStore('records').put(item)}})}catch(e){if(e.status!==401&&state.page!=='count')toast(e.message,true)}}state.records=(await all('records')).filter(r=>String(r.period_id)===String(state.period)&&r.warehouse===state.warehouse&&(state.session.user.admin||r.owner_id===state.session.user.id)).sort((a,b)=>(b.updated_at||b.created_at||'').localeCompare(a.updated_at||a.created_at||''));}
-async function loadAdminView(){if(!state.session?.user.admin||!state.period||!state.warehouse)return null;const cacheKey=`admin-view:${state.session.user.id}:${key()}`;if(!state.online)return await get(cacheKey);try{const data=await api('/consolidation?period_id='+encodeURIComponent(state.period)+'&warehouse='+encodeURIComponent(state.warehouse));data.fetched_at=new Date().toISOString();await put(cacheKey,data);return data}catch{return await get(cacheKey)}}
-async function reconcileCatalogVersion(){if(!state.session||!state.period||!state.warehouse||!state.online||!navigator.onLine)return;try{const scope='period_id='+encodeURIComponent(state.period)+'&warehouse='+encodeURIComponent(state.warehouse),check=await api('/catalog/version?'+scope);if(check.catalog_version===state.catalogVersion)return;const data=await api('/catalog?'+scope);state.catalog=cleanCatalog(data.rows||[]);state.catalogVersion=data.catalog_version;await put(catalogKey(),{rows:state.catalog});await put(`catalog-version:${state.session.user.id}:${key()}`,state.catalogVersion);await loadRecords();mergePendingArticles();if(state.session.user.admin)state.adminView=await loadAdminView();if(state.page==='count')SmartSheet.refresh();}catch{/* Background catalog check: retry next cycle and keep the cached catalog. */}}
-async function navigate(page){state.page=page;state.query='';if(['count','records','consolidation','reports'].includes(page)&&(!state.period||!state.warehouse)){state.page=state.period?'warehouses':'periods'}if(['count','records'].includes(state.page))await loadRecords();if(state.page==='count'&&state.session.user.admin)state.adminView=await loadAdminView();if(['consolidation','missing'].includes(state.page)&&state.online){try{state.consolidation=await api('/consolidation?period_id='+state.period+'&warehouse='+encodeURIComponent(state.warehouse));await put('consolidation:'+state.session.user.id+':'+key(),state.consolidation)}catch(e){toast(e.message,true)}}if(['consolidation','missing'].includes(state.page)&&!state.online)state.consolidation=await get('consolidation:'+state.session.user.id+':'+key());render();window.scrollTo(0,0)}
+}
+async function loadScope(scope=warehouseScope(),{join=false,localOnly=false}={}){
+  const [lock,catalog,version]=await Promise.all([get(finishKey(scope)),cachedCatalog(scope),get(scopeStorageKey('catalog-version',scope))]);
+  if(!sameWarehouseScope(scope))return false;
+  state.finishing=!!lock||!!scopeParticipant(scope)?.finished;
+  state.catalog=catalog;
+  state.catalogVersion=version;
+  if(state.online&&!localOnly){
+    if(join&&!scopeReadOnly(scope)&&!state.finishing){
+      await ensureParticipation(scope.period,scope.warehouse);
+      if(!sameWarehouseScope(scope))return false;
+    }
+    try{await fetchScopeCatalog(scope);}
+    catch(error){if(sameWarehouseScope(scope))toast(error.message,true);}
+  }
+  if(!sameWarehouseScope(scope))return false;
+  await loadRecords(scope);
+  if(!sameWarehouseScope(scope))return false;
+  mergePendingArticles();
+  const view=await loadAdminView(scope);
+  if(!sameWarehouseScope(scope))return false;
+  state.adminView=view;
+  return true;
+}
+async function loadRecords(scope=warehouseScope()){
+  if(!sameWarehouseScope(scope)||!scope.period||!scope.warehouse)return;
+  if(state.online){
+    try{
+      const result=await api('/records?'+scopeQuery(scope));
+      if(!sameWarehouseScope(scope))return;
+      await atomic(['operations','records'],transaction=>{
+        const queue=transaction.objectStore('operations').getAll();
+        queue.onsuccess=()=>{
+          const ids=new Set(queue.result.filter(op=>!op.resolved&&String(op.period_id)===String(scope.period)&&op.warehouse===scope.warehouse).map(op=>op.record_id));
+          for(const record of result.records||[]){
+            if(ids.has(record.id)||(record.period_id!=null&&String(record.period_id)!==String(scope.period))||
+              (record.warehouse!=null&&record.warehouse!==scope.warehouse))continue;
+            const item={...record,period_id:scope.period,warehouse:scope.warehouse,synced:true};
+            item.local_key=recordKey(item);
+            transaction.objectStore('records').put(item);
+          }
+        };
+      });
+    }catch(error){if(sameWarehouseScope(scope)&&error.status!==401&&state.page!=='count')toast(error.message,true);}
+  }
+  const records=await all('records');
+  if(sameWarehouseScope(scope)){
+    state.records=records.filter(record=>String(record.period_id)===String(scope.period)&&record.warehouse===scope.warehouse&&
+      (scope.admin||record.owner_id===scope.owner)).sort((a,b)=>(b.updated_at||b.created_at||'').localeCompare(a.updated_at||a.created_at||''));
+  }
+}
+async function readConsolidation(scope,prefix='consolidation'){
+  if(!scope.admin||!scope.period||!scope.warehouse||!sameWarehouseScope(scope))return null;
+  const cacheKey=scopeStorageKey(prefix,scope);
+  if(!state.online)return await get(cacheKey);
+  try{
+    const data=await api('/consolidation?'+scopeQuery(scope));
+    if(!sameWarehouseScope(scope))return null;
+    data.fetched_at=new Date().toISOString();
+    await put(cacheKey,data);
+    return data;
+  }catch{
+    const cached=await get(cacheKey);
+    return cached?{...cached,cached:true}:null;
+  }
+}
+function loadAdminView(scope=warehouseScope()){return readConsolidation(scope,'admin-view');}
+async function reconcileCatalogVersion(){
+  const scope=warehouseScope();
+  if(!scope.owner||!scope.period||!scope.warehouse||state.scopeLoading||!state.online||!navigator.onLine)return;
+  try{
+    const check=await api('/catalog/version?'+scopeQuery(scope));
+    if(!sameWarehouseScope(scope)||check.catalog_version===state.catalogVersion)return;
+    if(!await fetchScopeCatalog(scope))return;
+    await loadRecords(scope);
+    if(!sameWarehouseScope(scope))return;
+    mergePendingArticles();
+    const view=await loadAdminView(scope);
+    if(!sameWarehouseScope(scope))return;
+    state.adminView=view;
+    if(state.page==='count')SmartSheet.refresh();
+  }catch{/* Keep the last catalog when the connection is interrupted. */}
+}
+async function navigate(page){
+  const request=++navigationRevision;
+  const scope=warehouseScope();
+  const scoped=['count','records','consolidation','missing','reports'].includes(page);
+  state.page=scoped&&(!scope.period||!scope.warehouse)?(scope.period?'warehouses':'periods'):page;
+  const target=state.page;
+  state.query='';
+  if(['count','records'].includes(target))await loadRecords(scope);
+  if(request!==navigationRevision||!sameWarehouseScope(scope))return;
+  if(target==='count'&&scope.admin){
+    const view=await loadAdminView(scope);
+    if(request!==navigationRevision||!sameWarehouseScope(scope))return;
+    state.adminView=view;
+  }
+  if(['consolidation','missing','reports'].includes(target)&&scope.admin){
+    const result=await readConsolidation(scope);
+    if(request!==navigationRevision||!sameWarehouseScope(scope))return;
+    state.consolidation=result;
+  }
+  render();
+  window.scrollTo(0,0);
+}
+async function openWarehouse(code,destination='count'){
+  if(!state.period)throw new Error('Seleccione un período mensual.');
+  const request=++navigationRevision;
+  const scope=setWarehouseScope(state.period,code);
+  state.scopeLoading=true;
+  render();
+  try{
+    await put('selection',{period:scope.period,warehouse:scope.warehouse});
+    if(state.online)await refresh(true);
+    if(!sameWarehouseScope(scope)||request!==navigationRevision)return;
+    const target=destination==='count'&&scopeReadOnly(scope)?'reports':destination;
+    await loadScope(scope,{join:target==='count'});
+    if(!sameWarehouseScope(scope)||request!==navigationRevision)return;
+    state.scopeLoading=false;
+    await navigate(target);
+  }catch(error){
+    if(sameWarehouseScope(scope)&&request===navigationRevision)throw error;
+  }finally{
+    if(sameWarehouseScope(scope))state.scopeLoading=false;
+  }
+}
 function header(title,desc,actions='',context){return `<div class="page-head"><div><div class="eyebrow">${esc(context??(state.warehouse?'Bodega '+state.warehouse:state.period?periodName():'Control de inventario'))}</div><h1>${title}</h1><p>${desc}</p></div>${actions?`<div class="actions">${actions}</div>`:''}</div>`}
 function empty(title,text,action=''){return `<div class="card empty"><span class="empty-icon">▣</span><h2>${title}</h2><p>${text}</p>${action}</div>`}
 const mariIconPaths={
@@ -1086,7 +1280,7 @@ function mariIcon(name){
   return `<svg class="mari-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${mariIconPaths[name]}</svg>`;
 }
 function render(){if(!state.session){renderLogin();return}const user=state.session.user;const q=pending();const nav=[['periods','Inventarios'],['warehouses','Bodegas'],['count','Contar'],['records','Mis registros'],['sync','Sincronización']];if(user.admin)nav.push(['admin','Administración']);const names={periods:'Inventarios mensuales',warehouses:'Bodegas',count:'Conteo físico',records:'Mis registros',sync:'Sincronización',admin:'Administración',consolidation:'Consolidación',reports:'Reportes y firmas',history:'Historial'};$('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand mari-app-brand"><span class="mari-app-brand__plate"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></span><span class="mari-app-brand__caption">Conteo de<br>inventario</span></div><nav class="nav" aria-label="Navegación principal">${nav.map(([page,name])=>`<button class="${state.page===page?'active':''}" data-action="nav" data-page="${page}" ${state.page===page?'aria-current="page"':''}>${mariIcon(page)}${name}${page==='sync'&&user.admin&&q.length?`<span class="pending-count">${q.length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="person">${esc(user.name)}</div><div class="role">${user.admin?'Administración':'Contador'} · ${esc(user.device_id?.slice(-6)||'Este dispositivo')}</div><button data-action="identity">Cambiar identificación →</button>${state.install?button('Instalar aplicación','install','','small install'):''}</div></aside><main class="main"><div class="topbar"><div class="crumb"><span class="mari-breadcrumb-root">Mari</span><span class="mari-breadcrumb-divider" aria-hidden="true">/</span> ${esc(names[state.page]||'Inventarios')}${state.period?' / '+esc(periodName()):''}</div><div class="brand mobile-brand mari-app-mobile"><img src="./mari-logo.svg" alt="Mari" width="466" height="320"></div><div class="top-status">${window.INVENTORY_DEVELOPMENT?'<span class="dev-mark">DESARROLLO</span>':''}<span class="status ${!state.online?'offline':''}"><span class="dot"></span>${state.online?'Conectado':'Sin conexión'}</span><span class="badge ${state.offlineReady?'green':'amber'}">${state.offlineReady?'Offline listo':'Offline no preparado'}</span><span class="muted sync-label">${state.syncing?'Sincronizando':q.some(o=>['conflict','error'].includes(o.status)&&!autoRecoverableQueued(o))?'Necesita atención':!state.online||q.length?'Guardado en dispositivo':'Sincronizado'}</span>${button(esc(user.name),'identity','','small ghost')}${button('Salir','logout','','small ghost')}</div></div><div class="content">${!window.isSecureContext?notice('Este acceso usa HTTP. Para instalar y volver a abrir la aplicación sin Wi-Fi desde una tablet, configura HTTPS en la red local; consulta la guía de instalación.','amber'):''}${!state.offlineReady?notice('La protección offline todavía no está lista. Mantén esta página abierta y vuelve a cargar antes de empezar a contar.','amber'):''}${!state.online?notice('Trabajando sin conexión. Los conteos se conservan en este navegador y se enviarán al recuperar la conexión.','amber'):''}${state.session.expired?(user.admin?notice('La sesión administrativa necesita revalidación. '+button('Renovar sesión','renew-session','','small primary'),'amber'):notice('No se pudo renovar la sesión automáticamente. Los conteos permanecen guardados; avise a administración.','amber')):''}${renderPage()}</div></main></div>`;if(state.page==='count')SmartSheet.mount().catch(e=>toast(e.message,true));}
-function renderPage(){switch(state.page){case'periods':case'history':return renderPeriods();case'warehouses':return renderWarehouses();case'audit':return renderAudit();case'missing':return renderMissing();case'count':return renderCount();case'records':return renderRecords();case'sync':return renderSync();case'admin':return renderAdmin();case'consolidation':return renderConsolidation();case'reports':return renderReports();default:return renderPeriods()}}
+function renderPage(){if(state.scopeLoading&&['count','records','consolidation','missing','reports'].includes(state.page))return notice('Cargando la bodega…');switch(state.page){case'periods':case'history':return renderPeriods();case'warehouses':return renderWarehouses();case'audit':return renderAudit();case'missing':return renderMissing();case'count':return renderCount();case'records':return renderRecords();case'sync':return renderSync();case'admin':return renderAdmin();case'consolidation':return renderConsolidation();case'reports':return renderReports();default:return renderPeriods()}}
 function renderPeriods(){
   const periods=[...(state.data?.periods||[])].sort((a,b)=>Number(b.year)-Number(a.year)||Number(b.month)-Number(a.month));
   const warehouses=state.data?.warehouses||[];
@@ -1132,7 +1326,7 @@ function renderPeriods(){
     </section>`:empty('Sin períodos disponibles',isAdmin?'Crea un período e importa los archivos XLS de las bodegas para habilitar los conteos.':'El administrador debe preparar un período e importar los inventarios.');
   return `<div class="mari-periods">${overview}<div class="stats">${metrics}</div>${listing}</div>`;
 }
-function renderWarehouses(){if(!state.period)return header('Seleccione un inventario','Abra el período mensual para seleccionar una bodega.');const ws=(state.data.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return header('Bodegas del inventario',periodName(),state.session.user.admin?button('Importar XLS','import','','primary')+button('Cerrar mes','close-month'):'')+`<div class="grid">${ws.map(w=>`<article class="card warehouse"><div class="eyebrow">Bodega ${esc(w.code)}</div><h2>${esc(w.name)}</h2>${statusBadge(w.status)}<p class="small muted">${esc(w.items_count)} presentaciones${state.session.user.admin?' · '+esc(w.counted_count)+' con registro':''}</p>${button(isClosed(w)?'Consultar':'Abrir hoja','select-warehouse',`data-code="${esc(w.code)}"`,'primary')}</article>`).join('')}</div>`;}
+function renderWarehouses(){if(!state.period)return header('Seleccione un inventario','Abra el período mensual para seleccionar una bodega.');const ws=(state.data.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return header('Bodegas del inventario',periodName(),state.session.user.admin?button('Importar XLS','import','','primary')+button('Cerrar mes','close-month'):'')+`<div class="grid">${ws.map(w=>`<article class="card warehouse"><div class="eyebrow">Bodega ${esc(w.code)}</div><h2>${esc(w.name)}</h2>${statusBadge(w.status)}<p class="small muted">${esc(w.items_count)} presentaciones${state.session.user.admin?' · '+esc(w.counted_count)+' con registro':''}</p>${button(isClosed(w)?'Consultar':scopeReadOnly({...warehouseScope(),warehouse:w.code})?'Reportes y firmas':'Abrir hoja','select-warehouse',`data-code="${esc(w.code)}"`,'primary')}</article>`).join('')}</div>`;}
 
 function renderCount(){return SmartSheet.render();}
 function productResults(){const search=state.query.trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase();const rows=state.catalog.filter(r=>(r.code+' '+r.name+' '+r.presentation).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase().includes(search));return rows.length?rows.slice(0,100).map(r=>`<button class="product ${state.selected?.code===r.code&&state.selected?.presentation===r.presentation?'selected':''}" data-action="select-product" data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}"><span><span class="name">${esc(r.name)}</span><span class="meta">${esc(r.code)} <span style="padding:0 7px">·</span> ${esc(r.presentation)}</span></span><span class="arrow">＋</span></button>`).join('')+(rows.length>100?'<p class="small muted">Se muestran 100 resultados. Escribe más letras para afinar la búsqueda.</p>':''):'<div class="empty"><p>No se encontraron artículos. Comprueba el código o cambia la búsqueda.</p></div>'}
@@ -1151,10 +1345,27 @@ function renderSync(){
  }
  return header('Diagnóstico de sincronización','Las operaciones conservan su identificador original; los reintentos idempotentes no vuelven a sumar.',button(state.syncing?'Sincronizando…':'Revisar ahora','sync',state.syncing?'disabled':'','primary'))+`<div class="stats"><div class="stat"><div class="label">Operaciones pendientes</div><div class="value">${list.filter(o=>!['conflict','error'].includes(o.status)).length}</div></div><div class="stat"><div class="label">Requieren revisión</div><div class="value">${list.filter(o=>['conflict','error'].includes(o.status)&&!autoRecoverableQueued(o)).length}</div></div><div class="stat"><div class="label">Última sincronización</div><div class="value" style="font-size:1.1rem">${state.lastSync?esc(new Date(state.lastSync).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})):'Sin envíos'}</div></div></div>`+(list.length?`<div class="stack">${list.map(o=>`<article class="sync-item"><div class="card-title"><h3>${o.kind==='correct'?'Corrección':o.kind==='recount'?'Recuento completo':'Conteo parcial'} · ${esc(o.code)}</h3><span class="badge ${['conflict','error'].includes(o.status)&&o.error_code!=='device_not_active'?'red':'amber'}">${o.error_code==='device_not_active'?'Recuperación automática':o.status==='conflict'?'Conflicto':o.status==='error'?'Error':'Pendiente'}</span></div><p>Bodega ${esc(o.warehouse)} · ${esc(o.presentation)} · Cantidad ${esc(o.quantity)}</p><p>${esc(new Date(o.created).toLocaleString('es'))} · ${esc(o.owner_name)}</p>${o.error&&!autoRecoverableQueued(o)?`<p style="color:var(--red)">${esc(o.error)}</p><div class="actions">${button('Revisar operación','resolve-op',`data-id="${esc(o.id)}"`,'small')}</div>`:''}<p class="small muted">ID ${esc(o.id)}</p></article>`).join('')}</div>`:empty('Todo está sincronizado','No hay operaciones pendientes en este navegador. Antes de terminar en una bodega, confirma que este dispositivo terminó.',state.period&&state.warehouse?button('Terminé en esta bodega','finish','','primary'):''));
 }
-function renderAdmin(){if(!state.session.user.admin)return empty('Acceso administrativo','Introduce la contraseña administrativa para continuar.',button('Acceder','elevate','','primary'));const ws=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return header('Panel administrativo','Prepara el inventario y revisa el cierre de cada bodega.',button('Actualizar bodega / importar XLS','import','','primary'))+`<div class="admin-grid"><section class="card"><div class="card-title"><h2>Preparación</h2><span class="badge">${esc(state.period?periodName():'Sin período')}</span></div><p class="section-caption">Puede actualizar la existencia teórica con un XLS mientras el período permanezca abierto. Se conservan los conteos físicos, correcciones, propietarios y firmas.</p><div class="actions">${button('Nuevo período','new-period')}${button('Agregar bodega','new-warehouse',!state.period?'disabled':'')}${button('Seleccionar período','nav','data-page="periods"')}${state.warehouse?button('Artículo nuevo','new-article'):''}</div><div class="divider"></div>${button('Cambiar contraseña administrativa','change-password','','ghost')}</section><section class="card"><h2>Control del cierre</h2><p class="section-caption">Cada reporte definitivo requiere dos firmas independientes y todas las operaciones conocidas sincronizadas.</p>${ws.length?ws.map(w=>`<div class="list-detail"><span>${esc(w.code)} · ${esc(w.name)}</span>${statusBadge(w.status)}</div>`).join(''):'<p class="muted small">Selecciona un período con bodegas.</p>'}<div class="actions" style="margin-top:20px">${button('Progreso de bodegas','nav','data-page="warehouses"')}${button('Cerrar inventario mensual','close-month',!state.period?'disabled':'','primary')}</div></section><section class="card span2"><h2>Historial de importaciones</h2>${renderImportHistory()}</section></div>`}
+function renderAdminSettings(){if(!state.session.user.admin)return empty('Acceso administrativo','Introduce la contraseña administrativa para continuar.',button('Acceder','elevate','','primary'));const ws=(state.data?.warehouses||[]).filter(w=>String(w.period_id)===String(state.period));return `<div class="admin-grid"><section class="card"><div class="card-title"><h2>Preparación</h2><span class="badge">${esc(state.period?periodName():'Sin período')}</span></div><p class="section-caption">Puede actualizar la existencia teórica con un XLS mientras el período permanezca abierto. Se conservan los conteos físicos, correcciones, propietarios y firmas.</p><div class="actions">${button('Nuevo período','new-period')}${button('Agregar bodega','new-warehouse',!state.period?'disabled':'')}${button('Seleccionar período','nav','data-page="periods"')}${state.warehouse?button('Artículo nuevo','new-article'):''}</div><div class="divider"></div>${button('Cambiar contraseña administrativa','change-password','','ghost')}</section><section class="card"><h2>Control del cierre</h2><p class="section-caption">Cada reporte definitivo requiere dos firmas independientes y todas las operaciones conocidas sincronizadas.</p>${ws.length?ws.map(w=>`<div class="list-detail"><span>${esc(w.code)} · ${esc(w.name)}</span>${statusBadge(w.status)}</div>`).join(''):'<p class="muted small">Selecciona un período con bodegas.</p>'}<div class="actions" style="margin-top:20px">${button('Progreso de bodegas','nav','data-page="warehouses"')}${button('Cerrar inventario mensual','close-month',!state.period?'disabled':'','primary')}</div></section><section class="card span2"><h2>Historial de importaciones</h2>${renderImportHistory()}</section></div>`}
 function renderImportHistory(){const imports=(state.data.imports||[]).filter(x=>!state.period||String(x.period_id)===String(state.period));return imports.length?`<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Archivo</th><th>Bodega</th><th>Artículos</th><th>Estado</th><th>Auditoría</th></tr></thead><tbody>${imports.map(x=>`<tr><td>${esc(x.at||x.created_at||'')}</td><td class="wrap">${esc(x.name||x.filename||'Importación')}</td><td>${esc(x.warehouse||x.warehouse_code||'')}</td><td>${esc(x.rows_count??x.rows??'')}</td><td>${esc(x.status||'Importado')}</td><td>${button('Ver cambios','import-changes',`data-id="${esc(x.id)}"`,'small ghost')}</td></tr>`).join('')}</tbody></table></div>`:'<p class="small muted">No hay importaciones registradas para este período.</p>'}
 function renderConsolidation(){const c=state.consolidation;return header('Resultado consolidado','Una línea por bodega, código y presentación. Las cantidades parciales se suman; las correcciones reemplazan.',button('Conteo','nav','data-page="count"')+button('Revisión de faltantes','nav','data-page="missing"')+button('Reportes y firmas','nav','data-page="reports"','primary'))+(!state.online?notice('Esta vista corresponde a la última consulta guardada. Consulta al servidor para obtener la consolidación actual.','amber'):'')+(c?`${(c.recounts||[]).length?notice('Hay '+c.recounts.length+' recuentos completos pendientes de decisión. No se suman automáticamente.','amber')+`<div class="stack" style="margin-bottom:20px">${c.recounts.map(r=>`<div class="record"><div><h3>Recuento · ${esc(r.code)} · ${esc(r.presentation)}</h3><p>${esc(r.owner_name)} · Cantidad propuesta ${esc(r.quantity)}</p></div>${state.session.user.admin?button('Resolver','resolve-recount',`data-id="${esc(r.id)}"`):''}</div>`).join('')}</div>`:''}${(c.conflicts||[]).length?notice('Hay '+c.conflicts.length+' conflictos de revisión pendientes. Resuélvelos antes del reporte definitivo.','red')+c.conflicts.map(x=>`<div class="record" style="margin-bottom:15px"><div><h3>Conflicto de revisión</h3><p>${esc(x.reason)} · ${esc(x.record_id)}</p></div>${button('Resolver conflicto','resolve-server-conflict',`data-operation="${esc(x.operation_id)}"`,'small')}</div>`).join(''):''}<div class="table-wrap"><table><thead><tr><th>Código / Artículo</th><th>Presentación</th><th class="right">Costo unitario</th><th class="right">Teórico</th><th class="right">Físico</th><th class="right">Diferencia</th><th class="right">Parciales</th><th>Revisión</th></tr></thead><tbody>${(c.rows||[]).map(r=>`<tr><td class="wrap"><strong>${esc(r.code)}</strong><br>${esc(r.name)}${r.is_new?' <span class="badge amber">Nuevo</span>':''}</td><td>${esc(r.presentation)}</td><td class="right">${r.cost==null?'—':esc(r.cost)}</td><td class="right">${esc(r.theoretical)}</td><td class="right"><strong>${r.quantity===null||r.quantity===undefined?'<span class="muted">Sin contar</span>':esc(r.quantity)}</strong></td><td class="right">${r.quantity==null||r.theoretical==null?'—':esc(decimalDifference(r.quantity,r.theoretical))}</td><td class="right">${Array.isArray(r.partials)?r.partials.length:esc(r.partials)}</td><td>${!isClosed()?button('Recuento completo','recount-item',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}"`,'small'):''}</td></tr>`).join('')}</tbody></table></div>`:empty('No hay resultados disponibles','Se necesita conexión para consultar por primera vez la consolidación.'))}
-function renderReports(){const w=currentWarehouse();if(!w)return renderWarehouses();const reports=[...(w.reports||[])].sort((a,b)=>b.version-a.version);const participants=w.participants||[];return header('Reportes, firmas y cierre','Cada firma queda vinculada al contenido y la versión específica del reporte.',(state.session.user.admin?button('Consolidación','nav','data-page="consolidation"'):'')+(state.session.user.admin&&!isClosed()?button('＋ Generar reporte','new-report','','primary'):''))+`<div class="two-col"><section class="card"><h2>Reportes de ${esc(w.name)}</h2><div class="stack">${reports.length?reports.map(r=>`<article class="report"><div class="card-title"><h3>${r.kind==='final'?'Definitivo':'Provisional'} · v${r.version}</h3>${r.closed?'<span class="badge green">Conservado / cerrado</span>':r.stale?'<span class="badge amber">Resultados modificados</span>':statusBadge(r.kind==='final'?'signing':'preparation')}</div><p class="hash">ID ${esc(r.id)}<br>Hash ${esc(r.content_hash)}</p>${r.kind==='final'?`<div class="signature-row">${['performed','reviewed'].map(role=>{const sig=(r.signatures||[]).find(s=>s.role===role);return `<div class="signature-box ${sig?'signed':''}"><strong>${role==='performed'?'Realizado por':'Revisado por'}</strong><br>${sig?esc(sig.name)+'<br>'+esc(sig.at||'Firma confirmada'):'Pendiente de firma'}</div>`}).join('')}</div>`:''}<div class="actions">${button('↓ PDF','download',`data-id="${esc(r.id)}" data-format="pdf"`,'small')}${button('↓ CSV','download',`data-id="${esc(r.id)}" data-format="csv"`,'small')}${button('↓ TXT original','download',`data-id="${esc(r.id)}" data-format="txt"`,'small')}${button('↓ PDF nuevos','download',`data-id="${esc(r.id)}" data-format="new-pdf"`,'small')}${state.session.user.admin&&!r.closed&&!r.stale&&r.kind==='final'?button('Firmar','sign',`data-id="${esc(r.id)}"`,'small primary')+button('Cerrar bodega','close-warehouse',`data-id="${esc(r.id)}"`,'small'):''}${state.session.user.admin&&!r.closed&&r.kind==='final'?button('Reabrir conteo','reopen',`data-id="${esc(r.id)}"`,'small danger'):''}</div></article>`).join(''):'<p class="small muted">No se han generado reportes. Puedes generar versiones provisionales durante el conteo.</p>'}</div></section><section class="card"><h2>Dispositivos participantes</h2><p class="section-caption">Cada dispositivo confirma que no conserva operaciones pendientes antes de generar el definitivo.</p>${participants.length?participants.map(p=>`<div class="list-detail"><div><strong>${esc(p.name)}</strong><div class="small muted" style="margin-top:5px">${esc(p.device_id)}${p.retired?' · Retirado':''}</div></div><div class="stack" style="gap:8px;justify-items:end"><span class="badge ${p.finished?'green':'amber'}">${p.finished?'Terminó':'En conteo'}</span>${state.session.user.admin&&!p.finished&&!isClosed()?button('Retirar','retire',`data-session="${esc(p.session_id)}"`,'small danger'):''}</div></div>`).join(''):'<p class="small muted">Todavía no hay participantes.</p>'}<div class="actions" style="margin-top:20px">${!isClosed()?button('Terminé en esta bodega','finish','','primary'):''}</div><div class="divider"></div><p class="small muted" style="line-height:1.7">Las firmas dibujadas son constancias manuscritas; no son firmas electrónicas certificadas. El cierre definitivo se valida en el servidor.</p></section></div>`}
+function hasBothSignatures(report){return ['performed','reviewed'].every(role=>(report.signatures||[]).some(signature=>signature.role===role));}
+function renderCloseReadiness(warehouse){
+  if(!state.session.user.admin||scopeReadOnly(warehouseScope()))return '';
+  if(!state.online)return notice('Conéctese para verificar los requisitos del cierre.','amber');
+  const review=state.consolidation;
+  const active=(warehouse.participants||[]).filter(participant=>!participant.finished&&!participant.retired).length;
+  const waiting=scopePending().length;
+  if(!review||review.cached)return notice('Abra Revisión de faltantes con conexión para comprobar qué queda por resolver antes del cierre.');
+  const blockers=[
+    [review.rows.filter(row=>row.quantity==null).length,'faltantes'],
+    [(review.conflicts||[]).length,'conflictos de revisión'],
+    [(review.recounts||[]).length,'recuentos por decidir'],
+    [active,'dispositivos por terminar'],
+    [waiting,'operaciones pendientes en este dispositivo']
+  ].filter(([count])=>count>0);
+  return blockers.length?notice('Antes del definitivo: '+blockers.map(([count,label])=>count+' '+label).join(' · ')+'.','amber'):notice('Listo para generar el reporte definitivo.');
+}
+function renderReports(){const w=currentWarehouse();if(!w)return renderWarehouses();const reports=[...(w.reports||[])].sort((a,b)=>b.version-a.version);const participants=w.participants||[];return header('Reportes, firmas y cierre','Cada firma queda vinculada al contenido y la versión específica del reporte.',(state.session.user.admin?button('Revisión de faltantes','nav','data-page="missing"')+button('Consolidación','nav','data-page="consolidation"'):'')+(state.session.user.admin&&!scopeReadOnly(warehouseScope())?button('＋ Generar reporte','new-report','','primary'):''))+renderCloseReadiness(w)+`<div class="two-col"><section class="card"><h2>Reportes de ${esc(w.name)}</h2><div class="stack">${reports.length?reports.map(r=>`<article class="report"><div class="card-title"><h3>${r.kind==='final'?'Definitivo':'Provisional'} · v${r.version}</h3>${r.closed?'<span class="badge green">Conservado / cerrado</span>':r.stale?'<span class="badge amber">Resultados modificados</span>':statusBadge(r.kind==='final'?'signing':'preparation')}</div><p class="hash">ID ${esc(r.id)}<br>Hash ${esc(r.content_hash)}</p>${r.kind==='final'?`<div class="signature-row">${['performed','reviewed'].map(role=>{const sig=(r.signatures||[]).find(s=>s.role===role);return `<div class="signature-box ${sig?'signed':''}"><strong>${role==='performed'?'Realizado por':'Revisado por'}</strong><br>${sig?esc(sig.name)+'<br>'+esc(sig.at||'Firma confirmada'):'Pendiente de firma'}</div>`}).join('')}</div>`:''}<div class="actions">${button('↓ PDF','download',`data-id="${esc(r.id)}" data-format="pdf"`,'small')}${button('↓ CSV','download',`data-id="${esc(r.id)}" data-format="csv"`,'small')}${button('↓ TXT original','download',`data-id="${esc(r.id)}" data-format="txt"`,'small')}${button('↓ PDF nuevos','download',`data-id="${esc(r.id)}" data-format="new-pdf"`,'small')}${state.session.user.admin&&!r.closed&&!r.stale&&r.kind==='final'?(hasBothSignatures(r)?button('Cerrar bodega','close-warehouse',`data-id="${esc(r.id)}"`,'small primary'):button('Firmar','sign',`data-id="${esc(r.id)}"`,'small primary')):''}${state.session.user.admin&&!r.closed&&r.kind==='final'?button('Reabrir conteo','reopen',`data-id="${esc(r.id)}"`,'small danger'):''}</div></article>`).join(''):'<p class="small muted">No se han generado reportes. Puedes generar versiones provisionales durante el conteo.</p>'}</div></section><section class="card"><h2>Dispositivos participantes</h2><p class="section-caption">Cada dispositivo confirma que no conserva operaciones pendientes antes de generar el definitivo.</p>${participants.length?participants.map(p=>`<div class="list-detail"><div><strong>${esc(p.name)}</strong><div class="small muted" style="margin-top:5px">${esc(p.device_id)}${p.retired?' · Retirado':''}</div></div><div class="stack" style="gap:8px;justify-items:end"><span class="badge ${p.finished?'green':'amber'}">${p.finished?'Terminó':'En conteo'}</span>${state.session.user.admin&&!p.finished&&!isClosed()?button('Retirar','retire',`data-session="${esc(p.session_id)}"`,'small danger'):''}</div></div>`).join(''):'<p class="small muted">Todavía no hay participantes.</p>'}<div class="actions" style="margin-top:20px">${!scopeReadOnly(warehouseScope())?(state.finishing?'<span class="badge green">Este dispositivo terminó</span>':button('Terminé en esta bodega','finish','','primary')):''}</div><div class="divider"></div><p class="small muted" style="line-height:1.7">Las firmas dibujadas son constancias manuscritas; no son firmas electrónicas certificadas. El cierre definitivo se valida en el servidor.</p></section></div>`}
 async function renderLogin(){
  const offlineSession=await get('session');
  const activationName=await get('owner_activation_name')||'';
@@ -1185,7 +1396,7 @@ async function renderLogin(){
 function dialog(title,body,submitLabel='Confirmar',submit=null){const m=$('#modal');m.innerHTML=`<form id="dialog-form"><div class="card-title"><h2>${title}</h2><button type="button" class="button ghost small" data-action="modal-close" aria-label="Cerrar ventana">✕</button></div>${body}<div class="dialog-actions">${button('Cancelar','modal-close')}${submit?`<button class="button primary" type="submit">${submitLabel}</button>`:''}</div></form>`;m.showModal();if(submit){$('#dialog-form').onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',m);btn.disabled=true;try{await submit(new FormData(e.target),m)}catch(error){toast(error.message,true)}finally{if(btn.isConnected)btn.disabled=false}}}$('input:not([type=hidden]),select,textarea',m)?.focus();return m;}
 function requireOnline(){if(!state.online||!navigator.onLine)throw new Error('Esta operación necesita conexión con el servidor.');if(state.session.expired)throw new Error('Renueva la sesión para realizar esta operación.');}
 async function adminMutation(path,body,message){requireOnline();const result=await api(path,body);await refresh(true);render();if(message)toast(message);return result;}
-function wireOperation(op){const fields=['name','zero_confirmed','id','kind','period_id','warehouse','record_id','code','presentation','quantity','zone','revision','reason'];return Object.fromEntries(fields.filter(k=>op[k]!==undefined).map(k=>[k,op[k]]));}
+function wireOperation(op){const fields=['name','zero_confirmed','only_if_missing','id','kind','period_id','warehouse','record_id','code','presentation','quantity','zone','revision','reason'];return Object.fromEntries(fields.filter(k=>op[k]!==undefined).map(k=>[k,op[k]]));}
 function decimal(input){const s=String(input).trim().replace(',','.');if(!/^\d+(?:\.\d{1,6})?$/.test(s))throw new Error('Introduce una cantidad válida, igual o mayor que cero, con hasta 6 decimales.');const [i,f]=s.split('.');const normalized=i.replace(/^0+(?=\d)/,'');if(normalized.length>12)throw new Error('La cantidad máxima es 999999999999 con hasta 6 decimales.');return normalized+(f?'.'+f:'');}
 async function saveCount(fd){if(!canCount())throw new Error('Primero inicia la participación del dispositivo con conexión.');const quantity=decimal(fd.get('quantity'));const product=state.catalog.find(p=>p.code===state.selected.code&&p.presentation===fd.get('presentation'));if(!product)throw new Error('Selecciona una presentación válida.');const recordId=uid(),now=new Date().toISOString();const operation={id:uid(),kind:fd.get('kind'),period_id:state.period,warehouse:state.warehouse,record_id:recordId,code:product.code,presentation:product.presentation,quantity,zone:String(fd.get('zone')||'').trim(),revision:0,reason:'',created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,token_user:state.session.user.id,status:'pending'};const record={id:recordId,name:product.name,...operation,kind:operation.kind,status:operation.kind==='recount'?'pending':'active',history:[],synced:false,created_at:now,updated_at:now};record.id=recordId;record.revision=1;record.status=operation.kind==='recount'?'pending':'effective';record.local_key=recordKey(record);await saveQueuedOperations([operation],[record]);state.lastZone=operation.zone;await loadQueue();state.records.unshift(record);$('#quantity').value='';$('#quantity').focus();toast('Conteo guardado: '+quantity+' '+product.presentation+(state.online?'':' · pendiente de conexión'));$('#product-results').innerHTML=productResults();if(state.online)sync().catch(()=>{});}
 let syncRun=null;
@@ -1194,7 +1405,21 @@ function autoRecoverableQueued(op){return ['device_not_active','internal','tempo
 function syncDelay(attempt){return Math.min(120000,2000*Math.pow(2,Math.min(Math.max(0,attempt-1),6)))}
 function isTransientSyncError(error){return error?.retryable===true||error?.code==='internal'||error?.code==='temporarily_unavailable'||[408,425,429].includes(error?.status)||error?.status>=500||error?.code==='network_error'}
 async function keepForRetry(op,error){op.status='pending';op.retry_attempt=(Number(op.retry_attempt)||0)+1;op.next_retry_at=Date.now()+syncDelay(op.retry_attempt);op.retry_reason=error?.code||'temporary';op.error=null;await atomic(['operations'],t=>t.objectStore('operations').put(op));}
-async function acceptSyncItem(op,item){await atomic(['operations','records'],t=>{t.objectStore('operations').delete(op.id);if(item.record&&!pending().some(later=>later.record_id===op.record_id&&later.id!==op.id&&operationOrder(later,op)>0)){const r={...item.record,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};r.local_key=recordKey(r);t.objectStore('records').put(r)}})}
+async function acceptSyncItem(op,item){
+  const skipped=op.only_if_missing===true&&item.record===null;
+  await atomic(['operations','records'],transaction=>{
+    transaction.objectStore('operations').delete(op.id);
+    const records=transaction.objectStore('records');
+    if(skipped){
+      records.delete(recordKey({period_id:op.period_id,warehouse:op.warehouse,id:op.record_id}));
+    }else if(item.record&&!pending().some(later=>later.record_id===op.record_id&&later.id!==op.id&&operationOrder(later,op)>0)){
+      const record={...item.record,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};
+      record.local_key=recordKey(record);
+      records.put(record);
+    }
+  });
+  if(skipped)activeZeroBatches.get(op.zero_batch_id)?.add(op.id);
+}
 async function recoverInactiveOperation(op){
  if(!state.online||!navigator.onLine)return false;
  const didJoin=await ensureParticipation(op.period_id,op.warehouse,true);
@@ -1251,53 +1476,140 @@ async function performSync(manual=false,force=false){if(!state.online||!navigato
    op.status='error';op.error=error.message||'La operación requiere revisión administrativa.';op.error_code=error.code||'sync_error';await atomic(['operations'],t=>t.objectStore('operations').put(op));blockedRecords.add(op.record_id);
   }
  }
- await loadQueue();state.lastSync=new Date().toISOString();await put('lastSync',state.lastSync);if(state.online){await refresh(true);if(state.period&&state.warehouse)await loadRecords();}
+ await loadQueue();
+ const outstandingIds=new Set(pending().map(op=>op.id));
+ if(operations.some(op=>!outstandingIds.has(op.id))){state.lastSync=new Date().toISOString();await put('lastSync',state.lastSync);}
+ if(state.online){await refresh(true);if(state.period&&state.warehouse)await loadRecords();}
  }finally{state.syncing=false;await loadQueue();if(state.page!=='count')render();else SmartSheet.refresh()}}
-async function correction(id){const r=state.records.find(x=>x.id===id);if(!r)throw new Error('No se encontró el registro.');if(r.owner_id!==state.session.user.id)throw new Error('Solo el contador original puede corregir este registro.');if(isClosed())throw new Error('La bodega está cerrada.');if(!canCount())throw new Error('Reanuda la participación del dispositivo para corregir. Los reportes definitivos bloquean las correcciones.');if(scopePending().some(o=>o.record_id===id&&['error','conflict'].includes(o.status)&&!autoRecoverableQueued(o)))throw new Error('Este registro requiere revisión administrativa antes de corregirse.');dialog('Corregir registro',`<p class="section-caption">${esc(r.name||r.code)} · ${esc(r.presentation)}<br>Cantidad actual: <strong>${esc(r.quantity)}</strong>. La nueva cantidad reemplaza este valor.</p><div class="field"><label for="correction-quantity">Nueva cantidad</label><input id="correction-quantity" name="quantity" inputmode="decimal" value="${esc(r.quantity)}" required></div><div class="field"><label for="correction-reason">Motivo de la corrección</label><textarea id="correction-reason" name="reason" required minlength="3" maxlength="500" placeholder="Explica por qué cambia la cantidad"></textarea></div>`,'Confirmar corrección',async fd=>{const quantity=decimal(fd.get('quantity'));const zero_confirmed=Number(quantity)===0;if(zero_confirmed&&!confirm('¿Confirma la cantidad física cero para este registro?'))return;const reason=String(fd.get('reason')).trim();if(reason.length<3)throw new Error('Indica el motivo de la corrección.');const now=new Date().toISOString();const operation={id:uid(),kind:'correct',zero_confirmed,period_id:state.period,warehouse:state.warehouse,record_id:r.id,code:r.code,presentation:r.presentation,quantity,zone:r.zone||'',revision:r.revision||0,reason,created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,status:'pending'};const revised={...r,quantity,revision:(r.revision||0)+1,synced:false,updated_at:now,history:[...(r.history||[]),{old_quantity:r.quantity,new_quantity:quantity,reason,at:now,name:state.session.user.name,local:true}]};await saveQueuedOperations([operation],[revised]);state.records=state.records.map(x=>x.id===r.id?revised:x);await loadQueue();$('#modal').close();render();toast('Corrección guardada. Se conserva la cantidad anterior en el historial.');if(state.online)sync().catch(()=>{});});}
+async function correction(id){const scope=warehouseScope();const r=state.records.find(x=>x.id===id);if(!r)throw new Error('No se encontró el registro.');if(r.owner_id!==state.session.user.id)throw new Error('Solo el contador original puede corregir este registro.');if(isClosed())throw new Error('La bodega está cerrada.');if(!canCount())throw new Error('Reanuda la participación del dispositivo para corregir. Los reportes definitivos bloquean las correcciones.');if(scopePending().some(o=>o.record_id===id&&['error','conflict'].includes(o.status)&&!autoRecoverableQueued(o)))throw new Error('Este registro requiere revisión administrativa antes de corregirse.');dialog('Corregir registro',`<p class="section-caption">${esc(r.name||r.code)} · ${esc(r.presentation)}<br>Cantidad actual: <strong>${esc(r.quantity)}</strong>. La nueva cantidad reemplaza este valor.</p><div class="field"><label for="correction-quantity">Nueva cantidad</label><input id="correction-quantity" name="quantity" inputmode="decimal" value="${esc(r.quantity)}" required></div><div class="field"><label for="correction-reason">Motivo de la corrección</label><textarea id="correction-reason" name="reason" required minlength="3" maxlength="500" placeholder="Explica por qué cambia la cantidad"></textarea></div>`,'Confirmar corrección',async fd=>{if(!sameWarehouseScope(scope)||!canCount())throw new Error('Vuelva a abrir el registro en la bodega activa.');const quantity=decimal(fd.get('quantity'));const zero_confirmed=Number(quantity)===0;if(zero_confirmed&&!confirm('¿Confirma la cantidad física cero para este registro?'))return;const reason=String(fd.get('reason')).trim();if(reason.length<3)throw new Error('Indica el motivo de la corrección.');const now=new Date().toISOString();const operation={id:uid(),kind:'correct',zero_confirmed,period_id:state.period,warehouse:state.warehouse,record_id:r.id,code:r.code,presentation:r.presentation,quantity,zone:r.zone||'',revision:r.revision||0,reason,created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,status:'pending'};const revised={...r,quantity,revision:(r.revision||0)+1,synced:false,updated_at:now,history:[...(r.history||[]),{old_quantity:r.quantity,new_quantity:quantity,reason,at:now,name:state.session.user.name,local:true}]};await saveQueuedOperations([operation],[revised]);if(sameWarehouseScope(scope))state.records=state.records.map(x=>x.id===r.id?revised:x);await loadQueue();$('#modal').close();render();toast('Corrección guardada. Se conserva la cantidad anterior en el historial.');if(state.online)sync().catch(()=>{});});}
 async function resolveOperation(id){const op=state.queue.find(o=>o.id===id);if(!op)return;let server=op.server_record;if(state.online&&op.kind==='correct'){const response=await api('/records?period_id='+op.period_id+'&warehouse='+encodeURIComponent(op.warehouse));server=response.records.find(r=>r.id===op.record_id)||server;}dialog('Revisar operación pendiente',`<p class="section-caption">${esc(op.error)}<br>Artículo ${esc(op.code)} · cantidad local ${esc(op.quantity)}</p>${server?notice('Cantidad actual en el servidor: <strong>'+esc(server.quantity)+'</strong> · revisión '+esc(server.revision)):''}<div class="field"><label for="resolution">Decisión</label><select name="decision" id="resolution"><option value="retry">${op.error_code==='device_not_active'?'Reincorporarme y reintentar esta misma operación':'Reintentar después de comprobar la causa'}</option>${op.kind==='correct'&&server?'<option value="rebase">Aplicar corrección sobre la revisión actual del servidor</option>':''}<option value="archive">Conservar operación en historial local sin reenviarla</option></select></div><div class="field"><label for="resolution-reason">Motivo de la decisión</label><textarea id="resolution-reason" name="reason" minlength="3" required></textarea></div><p class="small muted">Archivar deja constancia local. Las cantidades archivadas no se incorporan al resultado del servidor.</p>`,'Aplicar decisión',async fd=>{const decision=fd.get('decision'),reason=String(fd.get('reason')).trim();if(reason.length<3)throw new Error('Indica un motivo.');const now=new Date().toISOString();if(op.error_code==='device_not_active'&&decision==='retry'){requireOnline();await api('/join',{period_id:op.period_id,warehouse:op.warehouse});state.joined[key(op.period_id,op.warehouse)]=true;await put('joined:'+state.session.user.id,state.joined);const response=await api('/sync',{operations:[wireOperation(op)]});const retried=response.results?.find(item=>item.id===op.id);if(!retried)throw new Error('El servidor no confirmó el reintento; se conserva la operación con el mismo identificador.');if(retried.status==='ok'){await atomic(['operations','records'],t=>{t.objectStore('operations').delete(op.id);if(retried.record){const r={...retried.record,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};r.local_key=recordKey(r);t.objectStore('records').put(r)}});await refresh(true);await loadRecords();await loadQueue();$('#modal').close();render();toast('Conteo sincronizado con el mismo identificador.');return;}op.status=retried.status;op.error=retried.error||'La operación requiere revisión.';op.error_code=retried.code;await atomic(['operations'],t=>t.objectStore('operations').put(op));await loadQueue();throw new Error(op.error);}if(op.error_code==='revision_conflict'){requireOnline();await api('/conflicts/resolve',{operation_id:op.id,reason});}const changes=[];const old={...op,resolved:true,resolution:decision,resolution_reason:reason,resolved_at:now};if(decision==='archive')changes.push(old);else{changes.push(old);const next={...op,id:uid(),created:now,status:'pending',error:null};delete next.sequence;if(op.error_code==='zero_confirmation_required'){if(!confirm('¿Confirma físicamente que la cantidad de este registro es cero?'))return;next.zero_confirmed=true;}if(decision==='rebase'){changes.push(old);next.id=uid();next.revision=server.revision;next.reason=op.reason+' · Resolución: '+reason;next.created=now;delete next.resolved}changes.push(next)}const recordUpdates=[];if(decision==='archive'&&server){const r={...server,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};r.local_key=recordKey(r);recordUpdates.push(r);}else if(decision==='archive'){const r=state.records.find(x=>x.id===op.record_id);if(r)recordUpdates.push({...r,archived:true,synced:false});}await saveQueuedOperations(changes,recordUpdates);await loadQueue();await loadRecords();$('#modal').close();render();toast('Decisión guardada.');if(decision!=='archive'&&state.online)sync().catch(()=>{});});}
 async function importDialog(){if(!state.period)throw new Error('Selecciona primero un período mensual.');requireOnline();state.preview=null;dialog('Actualizar bodega desde XLS',`<p class="section-caption">${esc(periodName())}. Selecciona un archivo por bodega. Puedes volver a importar mientras el período esté abierto; las cantidades físicas, correcciones, firmas e historial se conservan.</p><div class="field"><label for="import-scope">Ámbito de bodega</label><select id="import-scope" name="scope"><option value="">Detectar automáticamente</option><option value="ADCOSA">ADCOSA</option><option value="CLUB">CLUB</option></select><span class="help">Los códigos 210, 300, 320 y 400 están compartidos entre empresas y requieren elegir ADCOSA o CLUB.</span></div><div class="file-drop"><div class="field"><label for="import-files">Archivos XLS</label><input id="import-files" type="file" name="files" accept=".xls" multiple required></div></div><div id="import-preview"></div>`,'Analizar archivos',async(fd,m)=>{const selected=$('#import-files',m).files;if(!selected.length)throw new Error('Selecciona al menos un archivo.');if(Array.from(selected).reduce((total,f)=>total+f.size,0)>20*1024*1024)throw new Error('El lote supera 20 MB. Divide los archivos en varios lotes.');const files=[];for(const f of selected){if(f.size>10*1024*1024)throw new Error('El archivo '+f.name+' supera 10 MB.');files.push({name:f.name,data:await fileBase64(f)})}state.preview=await api('/import/preview',{period_id:state.period,files,scope:fd.get('scope')||''});renderPreview(m);});}
 function fileBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(new Error('No se pudo leer '+file.name));r.readAsDataURL(file)})}
 function renderPreview(m){const p=state.preview;const errorList=(errors)=>errors.map(x=>`<li>${esc(typeof x==='string'?x:JSON.stringify(x))}</li>`).join('');$('#import-preview',m).innerHTML=`<h3>Vista previa del cambio</h3>${p.files.map(f=>`<div class="preview-file"><div class="card-title"><h3>${esc(f.warehouse_code||'Bodega sin identificar')} · ${esc(f.warehouse_name||'')}</h3>${f.duplicate?'<span class="badge amber">Archivo ya aplicado · idempotente</span>':'<span class="badge blue">Analizado</span>'}</div><p class="small muted">${esc(f.name||'')} · ${f.rows_count||0} líneas válidas</p><div class="chip-row"><span class="badge green">${f.new_articles||0} códigos nuevos</span><span class="badge blue">${f.new_combinations||0} presentaciones nuevas</span><span class="badge">${f.changed||0} artículos actualizados</span><span class="badge">${f.unchanged||0} sin cambios</span><span class="badge amber">${f.missing||0} ausentes · quedan para revisión</span></div><p class="small">Existencias teóricas que cambian: ${f.theoretical_changes||0} · Costos que cambian: ${f.cost_changes||0} · Presentaciones por revisar: ${f.presentation_changes||0}</p>${f.missing_examples?.length?`<details><summary>Ver artículos ausentes</summary><ul>${f.missing_examples.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></details>`:''}${f.errors?.length?`<ul style="color:var(--red)">${errorList(f.errors)}</ul>`:''}${f.warnings?.length?`<ul style="color:var(--amber)">${errorList(f.warnings)}</ul>`:''}</div>`).join('')}${p.errors?.length?notice('<ul>'+errorList(p.errors)+'</ul>','red'):''}<p class="small muted">La confirmación actualiza únicamente datos administrativos dentro de una transacción. No modifica conteos físicos ni correcciones. Un cambio de existencia puede reflejar documentos posteriores al conteo y requiere revisar la fecha de corte.</p>`;const form=$('#dialog-form',m);$('.dialog-actions',m).innerHTML=button('Cancelar','modal-close')+`<button class="button primary" type="submit" ${(p.errors?.length||p.files.some(f=>f.errors?.length))?'disabled':''}>Aplicar actualización</button>`;form.onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',m);btn.disabled=true;try{await adminMutation('/import/commit',{preview_id:p.preview_id},'Bodega actualizada; conteos físicos conservados.');m.close();state.page='warehouses';render()}catch(error){toast(error.message,true)}finally{btn.disabled=false}};}
 async function signatureDialog(reportId){requireOnline();const report=currentWarehouse()?.reports?.find(r=>String(r.id)===String(reportId));if(!report)throw new Error('No se encontró el reporte.');const existing=new Set((report.signatures||[]).map(s=>s.role));const options=[['performed','Realizado por'],['reviewed','Revisado por']].filter(([role])=>!existing.has(role));if(!options.length)throw new Error('Este reporte ya contiene las dos firmas.');const m=dialog('Firmar reporte definitivo',`<p class="section-caption">Bodega ${esc(state.warehouse)} · ${esc(periodName())} · versión ${report.version}</p><div class="field"><label for="signature-role">Función de la firma</label><select name="role" id="signature-role">${options.map(([role,name])=>`<option value="${role}">${name}</option>`).join('')}</select></div><div class="field"><label for="signature-name">Nombre de quien firma</label><input name="name" id="signature-name" autocomplete="name" required maxlength="100"></div><label class="field-label" for="signature-canvas">Firma manuscrita</label><canvas id="signature-canvas" class="signature" aria-label="Área para dibujar firma manuscrita" tabindex="0"></canvas><div class="actions">${button('Borrar y repetir','clear-signature','','small')}<span class="signature-help">Dibuja con el dedo, lápiz o ratón.</span></div><p class="small muted" style="margin-top:18px;line-height:1.6">La firma se vinculará al hash ${esc(report.content_hash?.slice(0,18))}… y no podrá cambiarse después del cierre.</p>`,'Confirmar firma',async fd=>{if(!m.signatureDrawn)throw new Error('Dibuja la firma antes de confirmar.');await adminMutation('/signatures',{report_id:report.id,role:fd.get('role'),name:String(fd.get('name')).trim(),image:$('#signature-canvas',m).toDataURL('image/png'),content_hash:report.content_hash},'Firma vinculada al reporte.');m.close();});const canvas=$('#signature-canvas',m);const rect=canvas.getBoundingClientRect();canvas.width=Math.round(rect.width*2);canvas.height=420;const context=canvas.getContext('2d');context.fillStyle='#ffffff';context.fillRect(0,0,canvas.width,canvas.height);context.strokeStyle='#112c42';context.lineWidth=4;context.lineCap='round';context.lineJoin='round';let drawing=false,last=null,travel=0;const position=e=>{const box=canvas.getBoundingClientRect();return {x:(e.clientX-box.left)*canvas.width/box.width,y:(e.clientY-box.top)*canvas.height/box.height}};canvas.addEventListener('pointerdown',e=>{e.preventDefault();drawing=true;last=position(e);canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drawing)return;e.preventDefault();const p=position(e);travel+=Math.hypot(p.x-last.x,p.y-last.y);context.beginPath();context.moveTo(last.x,last.y);context.lineTo(p.x,p.y);context.stroke();last=p;m.signatureDrawn=travel>35});const end=()=>drawing=false;canvas.addEventListener('pointerup',end);canvas.addEventListener('pointercancel',end);m.clearSignature=()=>{context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);travel=0;m.signatureDrawn=false};}
 async function downloadReport(id,format){requireOnline();if(cloud)await cloudRefresh();const endpoint=cloud?`${cloud.url}/functions/v1/${cloud.functionName}/api/reports/${encodeURIComponent(id)}/${format}`:'/api/reports/'+encodeURIComponent(id)+'/'+format;const headers={};if(cloud)headers.apikey=cloud.publishableKey;if(state.session?.token)headers.Authorization='Bearer '+state.session.token;const response=await fetch(endpoint,{headers});if(!response.ok){let e;try{e=await response.json()}catch{e={error:'No se pudo descargar el reporte.'}}throw new Error(e.error)}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`inventario-${state.warehouse}-${id}.${format==='new-pdf'?'pdf':format}`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+async function unsavedDraftCount(scope){
+  const prefix=draftPrefix(scope);
+  const range=IDBKeyRange.bound(prefix,prefix+'\uffff');
+  const drafts=await idbRequest(db.transaction('kv').objectStore('kv').getAll(range));
+  return drafts.filter(draft=>String(draft?.value??'').trim()).length;
+}
+function saveSheetDraft(scope,item,value){
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('kv','readwrite'),store=tx.objectStore('kv');
+    tx.oncomplete=resolve;
+    tx.onerror=()=>reject(tx.error);
+    tx.onabort=()=>reject(tx.error||new Error('Este dispositivo ya terminó. Reanude antes de editar.'));
+    const check=store.get(finishKey(scope));
+    check.onsuccess=()=>{
+      if(check.result){tx.abort();return;}
+      store.put({value},draftPrefix(scope)+item);
+    };
+  });
+}
+function acquireFinishLock(scope){
+  return new Promise((resolve,reject)=>{
+    const transaction=db.transaction('kv','readwrite'),store=transaction.objectStore('kv');
+    const lock=finishKey(scope);
+    let alreadyFinished=false;
+    transaction.oncomplete=resolve;
+    transaction.onerror=()=>reject(transaction.error);
+    transaction.onabort=()=>reject(alreadyFinished
+      ?new Error('Este dispositivo ya confirmó el fin. Si necesita contar de nuevo, use Reanudar en la hoja.')
+      :transaction.error||new Error('No se pudo iniciar la confirmación de fin.'));
+    const request=store.get(lock);
+    request.onsuccess=()=>{
+      if(request.result){alreadyFinished=true;transaction.abort();return;}
+      store.put(true,lock);
+    };
+  });
+}
+function finishDevice(){
+  requireOnline();
+  const scope=warehouseScope();
+  if(!scope.period||!scope.warehouse||scopeReadOnly(scope))throw new Error('Esta bodega ya no está disponible para contar.');
+  dialog('Confirmar fin del dispositivo',`<p class="section-caption">Guarda o borra las cantidades que sigan como borrador en todas las pestañas. Mari enviará los registros pendientes antes de confirmar el fin de la bodega ${esc(scope.warehouse)}.</p>`,'Terminé y envié todo',async()=>{
+    if(!sameWarehouseScope(scope))throw new Error('Vuelva a abrir la bodega para confirmar el fin.');
+    requireOnline();
+    const lock=finishKey(scope);
+    await acquireFinishLock(scope);
+    if(sameWarehouseScope(scope))state.finishing=true;
+    let keepLock=false;
+    try{
+      const drafts=await unsavedDraftCount(scope);
+      if(drafts)throw new Error(`Hay ${drafts} ${drafts===1?'cantidad sin guardar':'cantidades sin guardar'}. Vuelva a la hoja para guardarlas o borrarlas.`);
+      if(syncRun)await syncRun.catch(()=>{});
+      await sync(false,true);
+      await loadQueue();
+      if(!sameWarehouseScope(scope))throw new Error('La bodega cambió. Vuelva a abrirla para confirmar el fin.');
+      if(scopePending(scope.period,scope.warehouse).length)throw new Error('Aún hay operaciones pendientes o conflictos para esta bodega.');
+      try{
+        await api('/device/finish',{period_id:scope.period,warehouse:scope.warehouse,pending:0});
+        keepLock=true;
+      }catch(error){
+        keepLock=![400,401,403,404,409,422].includes(error.status);
+        if(keepLock)error.message+=' El servidor pudo haber confirmado el fin. Revise el estado antes de reanudar.';
+        throw error;
+      }
+      if(state.session?.user.id===scope.owner){
+        delete state.joined[key(scope.period,scope.warehouse)];
+        await put('joined:'+scope.owner,state.joined);
+        await refresh(true);
+      }
+      if($('#modal').open)$('#modal').close();
+      render();
+      toast('Dispositivo confirmado como terminado.');
+    }finally{
+      if(!keepLock)await del(lock);
+      if(sameWarehouseScope(scope))state.finishing=keepLock;
+    }
+  });
+}
 const actions={
  reload:()=>location.reload(),
  'send-owner-activation':async()=>{if(!cloud)throw new Error('La verificación requiere conexión.');const name=String($('#login-name')?.value||'').trim();if(!name)throw new Error('Escriba su nombre para continuar.');await put('owner_activation_name',name);state.cloudAuth=await cloudIdentity();await api('/admin/activation-link',{});toast('Se envió un enlace al correo de la cuenta propietaria. Ábralo para continuar con la activación.');},
  'recount-item':el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');if(!canCount())throw new Error('Reanude el dispositivo en la hoja antes de registrar un recuento.');const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');dialog('Proponer recuento completo',`<p class="section-caption">${esc(product.name)} · ${esc(product.presentation)}. Este recuento queda pendiente; solo reemplaza los parciales si administración lo acepta explícitamente.</p><div class="field"><label for="recount-quantity">Cantidad física completa</label><input id="recount-quantity" name="quantity" inputmode="decimal" required></div>`,'Guardar propuesta',async fd=>{const q=decimal(fd.get('quantity'));const zero=Number(q)===0;if(zero&&!confirm('¿Confirma físicamente la cantidad cero?'))return;await queueSheetCount(product,q,{kind:'recount',zero_confirmed:zero});await sync();$('#modal').close();await navigate('consolidation');});},
- 'admin-scope':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');state.warehouse=el.dataset.code;await put('selection',{period:state.period,warehouse:state.warehouse});await loadScope();await navigate(el.dataset.page);},
+ 'admin-scope':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');await openWarehouse(el.dataset.code,el.dataset.page);},
  'audit':async()=>{requireOnline();const result=await api('/audit');state.audit=result.events||[];state.page='audit';render();},
  'sheet-new':()=>SmartSheet.newArticle(),
  'sheet-finish':()=>state.session.user.admin?navigate('missing'):dialog('Finalizar recorrido',`<p class="section-caption">Revise sus registros y sincronice este dispositivo antes de confirmar que terminó.</p>${button('Mis registros','nav','data-page="records"')}${button('Sincronizar','sync')}${button('Terminé y envié todo','finish','','primary')}`),
  'missing-zero-batch':()=>confirmMissingBatch(),
- 'missing-count':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');if(!canCount())throw new Error('Reanude el conteo del dispositivo antes de registrar cantidades.');const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');if(el.dataset.zero==='yes'){if(!confirm('¿Verificó físicamente que este artículo no existe?'))return;await queueSheetCount(product,'0',{zero_confirmed:true});await sync();await navigate('missing');}else{state.query=product.code;state.page='count';render();}},
+ 'missing-count':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');if(!canCount())throw new Error('Reanude el conteo del dispositivo antes de registrar cantidades.');const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');if(el.dataset.zero==='yes'){if(!confirm('¿Verificó físicamente que este artículo no existe?'))return;const scope=warehouseScope();await queueSheetCount(product,'0',{zero_confirmed:true,only_if_missing:true});if(state.online)await sync();if(sameWarehouseScope(scope)&&state.page==='missing')await navigate('missing');}else{state.query=product.code;state.page='count';render();}},
  'cloud-connect':()=>{if(!cloud)throw new Error('El panel QR solo está disponible en la instalación Pages.');location.href='/conectar-cloud.html'},
  'site-access':()=>{const q=qrcode(0,'M');q.addData(location.origin+location.pathname);q.make();dialog('QR opcional de acceso',`<div class="qr-private"><img alt="Código QR opcional para abrir Inventario Físico" src="${q.createDataURL(8,4)}"><p>Este QR solo abre la aplicación. No concede permisos ni reemplaza la identificación del empleado.</p></div>`,'Cerrar',null)},
- 'refresh-catalog':async()=>{requireOnline();const data=await api('/catalog?period_id='+encodeURIComponent(state.period)+'&warehouse='+encodeURIComponent(state.warehouse));state.catalog=cleanCatalog(data.rows||[]);await put(catalogKey(),{rows:state.catalog});if($('#product-results'))$('#product-results').innerHTML=productResults();toast('Catálogo actualizado: '+state.catalog.length+' presentaciones.');},
+ 'refresh-catalog':async()=>{requireOnline();if(!await fetchScopeCatalog(warehouseScope()))return;if(state.page==='count')SmartSheet.refresh();toast('Catálogo actualizado: '+state.catalog.length+' presentaciones.');},
  'renew-session':()=>{if(!state.online||!navigator.onLine)throw new Error('Conéctate para revalidar la sesión. Los conteos pendientes se conservan en este navegador.');const admin=!!state.session.user.admin;dialog(admin?'Renovar sesión administrativa':'Revalidar sesión de contador',admin?'<div class="field"><label for="reauth-secret">Contraseña administrativa</label><input id="reauth-secret" name="secret" type="password" autocomplete="current-password" required></div>':'<p class="section-caption">Vuelva a entrar con su nombre desde este navegador.</p>','Revalidar',async fd=>{const cloudAuth=state.session.cloudAuth;const role=admin?'admin':'counter';const result=await api('/login',{name:state.session.user.name,device_id:state.session.user.device_id,role,password:admin?fd.get('secret'):undefined});state.session={...result,...(cloudAuth?{cloudAuth}:{}),expired:false};await put('session',state.session);await refresh(true);$('#modal').close();render();await sync();toast('Sesión revalidada. Los registros conservan su contador original.')});},
  'resolve-server-conflict':el=>dialog('Resolver conflicto del servidor','<p class="section-caption">La operación rechazada no se aplica al resultado. Tras confirmar esta resolución, el contador podrá crear una corrección nueva sobre la revisión actual.</p><div class="field"><label for="server-conflict-reason">Motivo de la resolución</label><textarea id="server-conflict-reason" name="reason" minlength="5" required></textarea></div>','Resolver conflicto',async fd=>{await adminMutation('/conflicts/resolve',{operation_id:el.dataset.operation,reason:fd.get('reason')},'Conflicto resuelto con constancia.');$('#modal').close();await navigate('consolidation')}),
  'new-article':()=>{if(!state.period||!state.warehouse)throw new Error('Abre primero la bodega donde agregarás el artículo.');dialog('Agregar artículo sin referencia',`<p class="section-caption">Bodega ${esc(state.warehouse)} · ${esc(periodName())}. Este artículo aparecerá en el reporte de artículos nuevos.</p><div class="field"><label for="article-code">Código</label><input id="article-code" name="code" required maxlength="80"></div><div class="field"><label for="article-name">Nombre del artículo</label><input id="article-name" name="name" required maxlength="150"></div><div class="row"><div class="field"><label for="article-presentation">Presentación</label><input id="article-presentation" name="presentation" required maxlength="80"></div><div class="field"><label for="article-cost">Costo unitario</label><input id="article-cost" name="cost" inputmode="decimal" placeholder="Opcional"></div></div>`,'Agregar al catálogo',async fd=>{const body={period_id:state.period,warehouse:state.warehouse,code:String(fd.get('code')).trim(),name:String(fd.get('name')).trim(),presentation:String(fd.get('presentation')).trim()};if(String(fd.get('cost')).trim())body.cost=decimal(fd.get('cost'));await adminMutation('/articles',body,'Artículo agregado al catálogo de esta bodega.');await loadScope();$('#modal').close();render()})},
  'modal-close':()=>$('#modal').close(),
  reload:()=>location.reload(),
  nav:el=>navigate(el.dataset.page),
- 'select-period':async el=>{state.period=el.dataset.id;state.warehouse=null;await put('selection',{period:state.period,warehouse:null});await navigate('warehouses')},
- 'select-warehouse':async el=>{state.warehouse=el.dataset.code;await put('selection',{period:state.period,warehouse:state.warehouse});if(state.online){const refreshed=await refresh(true);if(!refreshed&&!state.joined[key()])throw new Error('No se pudo confirmar la conexión. Vuelva a intentarlo cuando recupere internet.');if(!isClosed())await ensureParticipation()}else if(!state.joined[key()])throw new Error('Conéctate una vez para habilitar esta bodega. Después podrás continuar sin conexión.');await loadScope();await navigate(isClosed()?'reports':'count')},
+ 'select-period':async el=>{const scope=setWarehouseScope(el.dataset.id,null);await put('selection',{period:scope.period,warehouse:null});if(sameWarehouseScope(scope))await navigate('warehouses');},
+ 'select-warehouse':el=>openWarehouse(el.dataset.code),
  'select-product':el=>{state.selected=state.catalog.find(r=>r.code===el.dataset.code&&r.presentation===el.dataset.presentation);$('#product-results').innerHTML=productResults();$('#count-form-panel').innerHTML=countForm();$('#quantity')?.focus();if(innerWidth<1000)$('#count-form-panel').scrollIntoView({behavior:'smooth',block:'start'})},
- join:async()=>{requireOnline();await ensureParticipation();await del(`finish-lock:${state.session.user.id}:${key()}`);state.finishing=false;await refresh(true);await loadScope();render();toast('Conteo habilitado en esta bodega.')},
- sync:()=>sync(true),
+ join:async()=>{
+  requireOnline();
+  const scope=warehouseScope();
+  if(!await ensureParticipation(scope.period,scope.warehouse,true,true))throw new Error('No se pudo reanudar el conteo en esta bodega.');
+  if(!sameWarehouseScope(scope))return;
+  await refresh(true);
+  if(sameWarehouseScope(scope)){await loadScope(scope);if(sameWarehouseScope(scope)){render();toast('Conteo habilitado en esta bodega.');}}
+ },
+ sync:()=>sync(true,true),
  'reload-records':async()=>{await loadRecords();render();toast('Registros actualizados.')},
  correct:el=>correction(el.dataset.id),
   'import-changes':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');requireOnline();const result=await api('/import/changes?import_id='+encodeURIComponent(el.dataset.id));const x=result.import;dialog('Auditoría de actualización XLS',`<p class="section-caption">${esc(x.warehouse)} · ${esc(x.filename)}<br>${esc(x.administrator)} · ${esc(new Date(x.at).toLocaleString('es-PA'))}<br>SHA-256 ${esc(x.sha256)}</p>${result.changes.length?result.changes.map(c=>`<div class="history-line"><strong>${esc(c.code)} · ${esc(c.presentation)} · ${esc(c.change_kind)}</strong><br><span class="small">Anterior: ${esc(JSON.stringify(c.old_values||{}))}</span><br><span class="small">Nuevo: ${esc(JSON.stringify(c.new_values||{}))}</span><br><span class="muted small">${esc(new Date(c.at).toLocaleString('es-PA'))}</span></div>`).join(''):'<p class="muted small">No hubo cambios de artículos. La importación quedó registrada sin duplicar el catálogo ni los conteos.</p>'}`)},
  'resolve-op':el=>resolveOperation(el.dataset.id),
  'record-history':el=>{const r=state.records.find(x=>x.id===el.dataset.id);dialog('Historial del registro',`<p class="section-caption">${esc(r.name||r.code)} · cantidad efectiva ${esc(r.quantity)} · revisión ${r.revision||0}</p>${r.history?.length?r.history.map(h=>`<div class="history-line"><strong>${esc(h.old_quantity??h.previous_quantity??'Original')} → ${esc(h.new_quantity??h.quantity??'')}</strong><br>${esc(h.reason||'Registro inicial')}<br><span class="muted small">${esc(h.name||h.owner_name||'')} · ${esc(h.at||h.created_at||'')}${h.local?' · guardado local':''}</span></div>`).join(''):'<p class="muted small">Registro original sin correcciones.</p>'}<div class="divider"></div><p class="small muted">Identificador ${esc(r.id)}</p>`)},
  identity:()=>dialog('Tu identificación',`<p class="section-caption">${esc(state.session.user.name)} · ${state.session.user.admin?'Administración':'Contador'}</p>${pending().length?notice('Hay '+pending().length+' operaciones pendientes en este dispositivo. Conserva la identificación actual para sincronizarlas.','amber'):''}<div class="stack">${!state.session.user.admin?button('Acceso administrativo','elevate','','primary'):''}${button('Cerrar sesión','logout','','danger')}${button('Instalar / añadir a inicio','install')}</div>`),
- logout:()=>dialog('Cerrar sesión',pending().length?`<p class="section-caption">Se intentará sincronizar primero. Si quedan operaciones pendientes o conflictos, la sesión se mantendrá abierta para conservar la autoría y permitir reintentar.</p>${notice(pending().length+' operaciones pendientes en este dispositivo.','amber')}`:'<p class="section-caption">Se cerrará la sesión en este dispositivo.</p>','Cerrar sesión',async()=>{if(pending().length){if(!state.online||state.session.expired)throw new Error('Conéctate y sincroniza los conteos pendientes antes de cerrar la sesión.');await sync();await loadQueue();if(pending().length)throw new Error('La sesión sigue abierta para conservar '+pending().length+' operaciones pendientes o conflictos. Revisa Sincronización y vuelve a intentarlo.')}let revoked=false;if(state.online&&!state.session.expired){try{await api('/logout',{});revoked=true}catch{}if(cloud){try{await fetch(`${cloud.url}/auth/v1/logout`,{method:'POST',headers:{apikey:cloud.publishableKey,Authorization:'Bearer '+state.session.token}})}catch{}}}await del('cloud_auth');await del('session');if($('#modal').open)$('#modal').close();state.session=null;state.data=null;state.page='periods';render();toast(revoked?'Sesión cerrada.':'Sesión cerrada en este dispositivo.') }),
+ logout:()=>dialog('Cerrar sesión',pending().length?`<p class="section-caption">Se intentará sincronizar primero. Si quedan operaciones pendientes o conflictos, la sesión se mantendrá abierta para conservar la autoría y permitir reintentar.</p>${notice(pending().length+' operaciones pendientes en este dispositivo.','amber')}`:'<p class="section-caption">Se cerrará la sesión en este dispositivo.</p>','Cerrar sesión',async()=>{if(pending().length){if(!state.online||state.session.expired)throw new Error('Conéctate y sincroniza los conteos pendientes antes de cerrar la sesión.');await sync();await loadQueue();if(pending().length)throw new Error('La sesión sigue abierta para conservar '+pending().length+' operaciones pendientes o conflictos. Revisa Sincronización y vuelve a intentarlo.')}let revoked=false;if(state.online&&!state.session.expired){try{await api('/logout',{});revoked=true}catch{}if(cloud){try{await fetch(`${cloud.url}/auth/v1/logout`,{method:'POST',headers:{apikey:cloud.publishableKey,Authorization:'Bearer '+state.session.token}})}catch{}}}await del('cloud_auth');await del('session');if($('#modal').open)$('#modal').close();state.session=null;state.data=null;setWarehouseScope(null,null);state.page='periods';render();toast(revoked?'Sesión cerrada.':'Sesión cerrada en este dispositivo.') }),
  resume:async()=>{state.session=await get('session');await restoreSession();render();if(state.online)refresh(true).then(()=>render()).catch(error=>toast(error.message,true))},
  elevate:()=>dialog('Acceso administrativo','<div class="field"><label for="admin-password">Contraseña administrativa compartida</label><input id="admin-password" name="password" type="password" autocomplete="current-password" required></div>','Acceder',async fd=>{requireOnline();const result=await api('/admin',{password:fd.get('password')});if(result.token)state.session.token=result.token;if(result.user)state.session.user=result.user;await refresh(true);$('#modal').close();state.page='admin';render();toast('Acceso administrativo habilitado.')}),
- 'new-period':()=>{const now=new Date();dialog('Preparar inventario mensual',`<div class="row"><div class="field"><label for="period-month">Mes</label><select id="period-month" name="month">${months.map((m,i)=>`<option value="${i+1}" ${i===now.getMonth()?'selected':''}>${m}</option>`).join('')}</select></div><div class="field"><label for="period-year">Año</label><input type="number" id="period-year" name="year" value="${now.getFullYear()}" min="2000" max="2200" required></div></div>`,'Crear período',async fd=>{const r=await adminMutation('/periods',{month:Number(fd.get('month')),year:Number(fd.get('year'))},'Período creado.');state.period=r.id;state.warehouse=null;state.page='warehouses';$('#modal').close();render()})},
+ 'new-period':()=>{const now=new Date();dialog('Preparar inventario mensual',`<div class="row"><div class="field"><label for="period-month">Mes</label><select id="period-month" name="month">${months.map((m,i)=>`<option value="${i+1}" ${i===now.getMonth()?'selected':''}>${m}</option>`).join('')}</select></div><div class="field"><label for="period-year">Año</label><input type="number" id="period-year" name="year" value="${now.getFullYear()}" min="2000" max="2200" required></div></div>`,'Crear período',async fd=>{const r=await adminMutation('/periods',{month:Number(fd.get('month')),year:Number(fd.get('year'))},'Período creado.');setWarehouseScope(r.id,null);state.page='warehouses';$('#modal').close();render()})},
  'new-warehouse':()=>{if(!state.period)throw new Error('Selecciona un período.');dialog('Agregar bodega','<div class="field"><label for="warehouse-code">Código de bodega</label><input id="warehouse-code" name="code" required maxlength="30"></div><div class="field"><label for="warehouse-name">Nombre</label><input id="warehouse-name" name="name" required maxlength="150"></div><p class="small muted">El catálogo se incorpora mediante importación XLS.</p>','Agregar',async fd=>{await adminMutation('/warehouse',{period_id:state.period,code:String(fd.get('code')).trim(),name:String(fd.get('name')).trim()},'Bodega agregada.');$('#modal').close()})},
  import:()=>importDialog(),
  'change-password':()=>dialog('Cambiar contraseña administrativa','<div class="field"><label for="old-password">Contraseña actual</label><input id="old-password" type="password" name="old_password" autocomplete="current-password" required></div><div class="field"><label for="new-password">Nueva contraseña</label><input id="new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" required><span class="help">Mínimo 12 caracteres.</span></div>','Cambiar contraseña',async fd=>{await adminMutation('/password',{old_password:fd.get('old_password'),new_password:fd.get('new_password')},'Contraseña actualizada.');$('#modal').close()}),
- finish:async()=>{requireOnline();dialog('Confirmar fin del dispositivo',`<p class="section-caption">Confirme que terminó de contar en todas las pestañas de este dispositivo. Se enviarán los registros pendientes antes de confirmar el fin de la bodega ${esc(state.warehouse)}.</p>`,'Terminé y envié todo',async()=>{const lock=`finish-lock:${state.session.user.id}:${key()}`;let confirmed=false,attempted=false,certainFailure=false;state.finishing=true;await put(lock,true);try{await sync();await loadQueue();if(scopePending().length)throw new Error('Aún hay operaciones pendientes o conflictos para esta bodega.');attempted=true;await api('/device/finish',{period_id:state.period,warehouse:state.warehouse,pending:0});confirmed=true;delete state.joined[key()];await put('joined:'+state.session.user.id,state.joined);await refresh(true);$('#modal').close();render();toast('Dispositivo confirmado como terminado.');}catch(e){certainFailure=[400,401,403,404,409,422].includes(e.status);if(attempted&&!certainFailure){delete state.joined[key()];await put('joined:'+state.session.user.id,state.joined);e.message+=' El fin podría haberse registrado. Se conserva el bloqueo; reanude con conexión antes de contar.';}throw e;}finally{state.finishing=!confirmed&&attempted&&!certainFailure;if(!confirmed&&(!attempted||certainFailure))await del(lock);}});},
+ finish:()=>finishDevice(),
  retire:el=>dialog('Retirar dispositivo participante','<p class="notice amber">El dispositivo puede conservar conteos offline que todavía no envió. Recupera sus registros antes de retirarlo. La renuncia quedará auditada.</p><div class="field"><label for="retire-reason">Motivo y comprobación realizada</label><textarea id="retire-reason" name="reason" required minlength="12"></textarea></div>','Confirmar retiro',async fd=>{await adminMutation('/device/retire',{period_id:state.period,warehouse:state.warehouse,session_id:el.dataset.session,reason:fd.get('reason')},'Participante retirado con constancia.');$('#modal').close()}),
  'new-report':()=>dialog('Generar reporte',`<p class="section-caption">${esc(periodName())} · ${esc(currentWarehouse().name)}. Cada generación conserva una nueva versión del resultado.</p><div class="field"><label for="report-kind">Tipo de reporte</label><select id="report-kind" name="kind"><option value="provisional">Provisional · permite continuar contando</option><option value="final">Definitivo · bloquea conteos y habilita firmas</option></select></div><p class="small muted">El reporte definitivo exige resolver los faltantes, confirmar todos los dispositivos y resolver los conflictos.</p>`,'Generar versión',async fd=>{if(scopePending().length)throw new Error('Sincroniza los registros de esta bodega antes de generar el reporte.');await adminMutation('/reports',{period_id:state.period,warehouse:state.warehouse,kind:fd.get('kind'),uncounted_reason:''},'Nueva versión del reporte generada.');$('#modal').close();render()}),
  download:el=>downloadReport(el.dataset.id,el.dataset.format),
@@ -1312,9 +1624,29 @@ const actions={
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el||el.disabled)return;const fn=actions[el.dataset.action];if(!fn)return;try{await fn(el)}catch(error){toast(error.message,true)}});
 document.addEventListener('input',e=>{if(e.target.id==='record-search'){const q=e.target.value.toLocaleLowerCase();$('#record-results').innerHTML=recordsHTML(effectiveRecords().filter(r=>[r.name,r.code,r.owner_name,r.zone].join(' ').toLocaleLowerCase().includes(q)))}});
  document.addEventListener('submit',async e=>{if(e.target.id==='count-form'){e.preventDefault();const b=$('button[type=submit]',e.target);b.disabled=true;try{await saveCount(new FormData(e.target))}catch(error){toast(error.message,true)}finally{if(b.isConnected)b.disabled=!canCount()}}if(e.target.id==='login-form'){e.preventDefault();const b=$('button[type=submit]',e.target);b.disabled=true;try{const fd=new FormData(e.target);const role=String(fd.get('role')||'counter');let deviceId=await get('device_id');if(!deviceId){deviceId=uid();await put('device_id',deviceId)}if(cloud)state.cloudAuth=await cloudIdentity();const result=await api('/login',{name:String(fd.get('name')).trim(),device_id:deviceId,role,password:role==='admin'?fd.get('password')||undefined:undefined});if(cloud){result.cloudAuth=state.cloudAuth;await put('cloud_auth',state.cloudAuth);state.cloudAuth=null}await del('owner_activation_name');state.session=result;state.session.expired=false;await put('session',state.session);await restoreSession();await refresh(true);render();if(state.online)sync().catch(()=>{})}catch(error){state.cloudAuth=null;toast(error.message,true)}finally{if(b.isConnected)b.disabled=false}}});
-async function restoreSession(){state.data=await get('snapshot:'+state.session.user.id)||{user:state.session.user,periods:[],warehouses:[],imports:[],config:{}};state.joined=await get('joined:'+state.session.user.id)||{};const selected=await get('selection');state.period=selected?.period||null;state.warehouse=selected?.warehouse||null;state.lastSync=await get('lastSync');await loadQueue();if(state.period&&state.warehouse){state.finishing=!!await get(`finish-lock:${state.session.user.id}:${key()}`);state.catalog=await cachedCatalog();state.catalogVersion=await get(`catalog-version:${state.session.user.id}:${key()}`);await loadRecords();mergePendingArticles()}state.page=state.period?'warehouses':'periods';}
-window.addEventListener('online',async()=>{state.online=true;render();if(state.session){const refreshed=await refresh(true);if(refreshed&&state.period&&state.warehouse&&!isClosed()){try{await ensureParticipation()}catch{}}await reconcileCatalogVersion();await sync(false,true).catch(()=>{});render()}});
-window.addEventListener('visibilitychange',async()=>{if(document.visibilityState==='visible'&&navigator.onLine&&state.session){state.online=true;const refreshed=await refresh(true);if(refreshed&&state.period&&state.warehouse&&!isClosed()){try{await ensureParticipation()}catch{}}await reconcileCatalogVersion();await sync(false,true).catch(()=>{});render()}});
+async function restoreSession(){
+  const owner=state.session.user.id;
+  state.data=await get('snapshot:'+owner)||{user:state.session.user,periods:[],warehouses:[],imports:[],config:{}};
+  state.joined=await get('joined:'+owner)||{};
+  const selected=await get('selection');
+  const scope=setWarehouseScope(selected?.period||null,selected?.warehouse||null);
+  state.lastSync=await get('lastSync');
+  await loadQueue();
+  if(scope.period&&scope.warehouse)await loadScope(scope,{localOnly:true});
+  if(sameWarehouseScope(scope))state.page=scope.period?'warehouses':'periods';
+}
+async function reconnectInventory(){
+  const owner=state.session?.user.id;
+  if(!owner)return;
+  await refresh(true);
+  if(state.session?.user.id!==owner)return;
+  await reconcileCatalogVersion();
+  if(state.session?.user.id!==owner)return;
+  await sync(false,true).catch(()=>{});
+  if(state.session?.user.id===owner&&!$('#modal').open)render();
+}
+window.addEventListener('online',()=>{state.online=true;if(!$('#modal').open)render();reconnectInventory().catch(()=>{});});
+window.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&navigator.onLine&&state.session){state.online=true;reconnectInventory().catch(()=>{});}});
 window.addEventListener('offline',()=>{state.online=false;render();toast('Sin conexión. Puedes seguir contando con el catálogo descargado.')});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();state.install=e;if(state.session)render()});
 
@@ -1322,7 +1654,19 @@ async function consumeAuthRedirect(){if(!cloud)return false;const params=new URL
 async function boot(){const offlineReady=prepareOfflineShell().catch(()=>false);try{await openDB();const ownerCallback=await consumeAuthRedirect();await migrateOperationSequence();await migrateCatalogPrivacy();await loadQueue();state.session=await get('session');state.cloudAuth=await get('cloud_auth');if(ownerCallback){await del('session');state.session=null}state.offlineReady=await offlineReady;if(state.session){await restoreSession();render();if(state.online){await refresh(true);render();sync(false,true).catch(()=>{})}}else render();if(!state.offlineReady)toast('La caché offline no quedó lista. No empieces a contar hasta volver a cargar con conexión.',true);if(navigator.storage?.persist)navigator.storage.persist().catch(()=>{});refreshTimer=setInterval(async()=>{if(!state.session||!navigator.onLine||polling||document.hidden)return;polling=true;try{await refresh(true);await sync();if(!['count','records'].includes(state.page)&&!$('#modal').open)render()}catch{}finally{polling=false}},15000)}catch(error){$('#app').innerHTML=`<div class="boot"><h1>No se pudo abrir el almacenamiento</h1><p style="max-width:550px;text-align:center;line-height:1.6">${esc(error.message)}. Permite el almacenamiento del navegador y utiliza una ventana normal. No se pueden guardar conteos de forma segura sin IndexedDB.</p><button class="button primary" data-action="reload">Volver a intentar</button></div>`}}
 boot();
 let adminPolling=false;
-setInterval(async()=>{if(adminPolling||!state.session?.user.admin||state.page!=='count'||!state.online||!navigator.onLine||document.hidden||!state.period||!state.warehouse)return;adminPolling=true;try{const next=await loadAdminView();if(next&&Number(next.generation)!==Number(state.adminView?.generation)){state.adminView=next;await loadRecords();SmartSheet.refresh();}}catch{}finally{adminPolling=false}},5000);
+setInterval(async()=>{
+  const scope=warehouseScope();
+  if(adminPolling||!scope.admin||state.page!=='count'||state.scopeLoading||!state.online||!navigator.onLine||document.hidden||!scope.period||!scope.warehouse)return;
+  adminPolling=true;
+  try{
+    const next=await loadAdminView(scope);
+    if(sameWarehouseScope(scope)&&next&&Number(next.generation)!==Number(state.adminView?.generation)){
+      state.adminView=next;
+      await loadRecords(scope);
+      if(sameWarehouseScope(scope)&&state.page==='count')SmartSheet.refresh();
+    }
+  }catch{}finally{adminPolling=false;}
+},5000);
 setInterval(()=>reconcileCatalogVersion(),15000);
 
 </script></head><body><div id="app">
