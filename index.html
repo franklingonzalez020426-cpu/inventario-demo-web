@@ -789,10 +789,10 @@ function decimalDifference(a,b){
 const missingItemKey=row=>JSON.stringify([row.code,row.presentation]);
 function missingWithoutPending(consolidation){
   const blocked=new Set([...scopePending(),...(consolidation.recounts||[])].map(missingItemKey));
-  return consolidation.rows.filter(row=>row.quantity==null&&!blocked.has(missingItemKey(row)));
+  return consolidation.rows.filter(row=>row.quantity==null&&!row.pending_review&&!blocked.has(missingItemKey(row)));
 }
 function isMissingBatchScope(scope){
-  return scope.admin&&sameWarehouseScope(scope);
+  return sameWarehouseScope(scope)&&canPrepareReports();
 }
 function requireMissingBatchScope(scope){
   if(!isMissingBatchScope(scope))throw new Error('Vuelva a abrir la revisión de faltantes de esta bodega.');
@@ -801,7 +801,7 @@ function requireMissingBatchScope(scope){
 }
 async function readMissingBatch(scope){
   requireMissingBatchScope(scope);
-  const consolidation=await api('/consolidation?period_id='+encodeURIComponent(scope.period)+'&warehouse='+encodeURIComponent(scope.warehouse));
+  const consolidation=await fetchMissingReview(scope);
   await loadQueue();
   requireMissingBatchScope(scope);
   state.consolidation=consolidation;
@@ -863,7 +863,7 @@ async function confirmMissingBatch(){
     const skipped=listed.length-saved.length+skippedByServer.size;
     if(isMissingBatchScope(scope)&&state.page==='missing'&&state.online){
       try{
-        const latest=await api('/consolidation?period_id='+encodeURIComponent(scope.period)+'&warehouse='+encodeURIComponent(scope.warehouse));
+        const latest=await fetchMissingReview(scope);
         if(isMissingBatchScope(scope)&&state.page==='missing'){
           state.consolidation=latest;
           render();
@@ -880,16 +880,25 @@ async function confirmMissingBatch(){
 }
 
 function renderMissing(){
-  if(!state.session.user.admin)return notice('Acceso administrativo requerido.','amber');
+  if(!canPrepareReports())return notice('Incorpórese al conteo de esta bodega para revisar los faltantes.','amber');
+  const scope=warehouseScope();
+  const active=canCount()&&state.online&&!state.session.expired;
+  const editable=state.online&&!state.session.expired&&!scopeReadOnly(scope);
+  const actions=button('Volver al conteo','nav','data-page="count"')
+    +(scope.admin?button('Consolidación','nav','data-page="consolidation"'):'')
+    +button('Reportes y firmas','nav','data-page="reports"','primary');
+  const title=header('Revisión de faltantes','Resuelva cada artículo con una cantidad física o un cero verificado.',actions);
   const c=state.consolidation;
-  if(!c)return notice('Se necesita conexión para consultar los faltantes.','amber');
+  if(!c)return title+notice('Conéctese y vuelva a abrir esta revisión para consultar los faltantes.','amber');
   const unresolved=c.rows.filter(r=>r.quantity==null),zero=c.rows.filter(r=>r.quantity!=null&&Number(r.quantity)===0);
   const eligible=missingWithoutPending(c).length;
-  return header('Revisión de faltantes','Resuelva cada artículo con una cantidad física o un cero verificado.',button('Volver al conteo','nav','data-page="count"')+button('Consolidación','nav','data-page="consolidation"')+button('Reportes y firmas','nav','data-page="reports"','primary'))+
+  return title+
     (!state.online?notice('Consulta guardada. El cierre requiere verificar nuevamente con el servidor.','amber'):'')+
-    notice(`${unresolved.length} artículos sin resolver. ${zero.length} con cantidad cero registrada. Las operaciones pendientes en este dispositivo no se consideran confirmadas por el servidor.`)+
-    (eligible&&state.online&&!state.session.expired&&!isClosed()?`<div class="missing-bulk-action">${button('Confirmar faltantes en cero','missing-zero-batch','','primary')}</div>`:'')+
-    `<div class="stack">${unresolved.map(r=>`<div class="record missing-row"><div><h3>${esc(r.name)}</h3><p>${esc(r.code)} · ${esc(r.presentation)}</p></div><div class="actions">${button('Registrar cantidad','missing-count',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}"`,'small primary')}${button('Confirmar cero','missing-count',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}" data-zero="yes"`,'small')}</div></div>`).join('')||'<p>No hay artículos sin resolver.</p>'}</div>`;
+    notice(`${unresolved.length} artículos sin resolver. ${scope.admin?`${zero.length} con cantidad cero registrada. `:''}Las operaciones pendientes en este dispositivo no se consideran confirmadas por el servidor.`)+
+    (editable?`<div class="actions missing-bulk-action">${active
+      ? (eligible?button('Confirmar faltantes en cero','missing-zero-batch','','primary'):'')+button('Terminé en esta bodega','finish')
+      : button('Reanudar conteo','join','','primary')}</div>`:'')+
+    `<div class="stack">${unresolved.map(r=>`<div class="record missing-row"><div><h3>${esc(r.name)}</h3><p>${esc(r.code)} · ${esc(r.presentation)}</p></div><div class="actions">${r.pending_review?'<span class="badge amber">Recuento pendiente de revisión</span>':active?`${button('Registrar cantidad','missing-count',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}"`,'small primary')}${button('Confirmar cero','missing-count',`data-code="${esc(r.code)}" data-presentation="${esc(r.presentation)}" data-zero="yes"`,'small')}`:''}</div></div>`).join('')||'<p>No hay artículos sin resolver.</p>'}</div>`;
 }
 
 function renderAdmin(){
@@ -1233,6 +1242,9 @@ async function readConsolidation(scope,prefix='consolidation'){
     return cached?{...cached,cached:true}:null;
   }
 }
+function fetchMissingReview(scope){
+  return api((scope.admin?'/consolidation':'/missing')+'?'+scopeQuery(scope));
+}
 function loadAdminView(scope=warehouseScope()){return readConsolidation(scope,'admin-view');}
 async function reconcileCatalogVersion(){
   const scope=warehouseScope();
@@ -1265,6 +1277,15 @@ async function navigate(page){
     const view=await loadAdminView(scope);
     if(request!==navigationRevision||!sameWarehouseScope(scope))return;
     state.adminView=view;
+  }
+  if(target==='missing'&&!scope.admin){
+    let result=null;
+    if(state.online&&canPrepareReports()){
+      try{result=await fetchMissingReview(scope);}
+      catch(error){if(request===navigationRevision&&sameWarehouseScope(scope))toast(error.message,true);}
+    }
+    if(request!==navigationRevision||!sameWarehouseScope(scope))return;
+    state.consolidation=result;
   }
   if(['consolidation','missing','reports'].includes(target)&&scope.admin){
     const result=await readConsolidation(scope);
@@ -1631,7 +1652,7 @@ function renderCloseReadiness(warehouse){
   return blockers.length?notice('Antes del definitivo: '+blockers.map(([count,label])=>count+' '+label).join(' · ')+'.','amber'):notice('Listo para generar el reporte definitivo.');
 }
 function hasBothSignatures(report){return ['performed','reviewed'].every(role=>(report.signatures||[]).some(signature=>signature.role===role));}
-function renderReports(){const w=currentWarehouse();if(!w)return renderWarehouses();const reports=[...(w.reports||[])].sort((a,b)=>b.version-a.version);return header('Reportes, firmas y cierre','Cada firma queda vinculada al contenido y la versión específica del reporte.',(state.session.user.admin?button('Revisión de faltantes','nav','data-page="missing"')+button('Consolidación','nav','data-page="consolidation"'):'')+(canPrepareReports(w)&&!scopeReadOnly(warehouseScope())?button('Generar provisional','new-report')+button('Solicitar firmas','request-signatures','','primary'):''))+renderCloseReadiness(w)+`<div class="two-col"><section class="card"><h2>Reportes de ${esc(w.name)}</h2><div class="stack">${reports.length?reports.map(r=>`<article class="report"><div class="card-title"><h3>${r.kind==='final'?'Definitivo':'Provisional'} · v${r.version}</h3>${r.closed?'<span class="badge green">Conservado / cerrado</span>':r.stale?'<span class="badge amber">Resultados modificados</span>':statusBadge(r.kind==='final'?'signing':'preparation')}</div><p class="hash">ID ${esc(r.id)}<br>Hash ${esc(r.content_hash)}</p>${r.kind==='final'?`<div class="signature-row">${['performed','reviewed'].map(role=>{const sig=(r.signatures||[]).find(s=>s.role===role);return `<div class="signature-box ${sig?'signed':''}"><strong>${role==='performed'?'Realizado por':'Revisado por'}</strong><br>${sig?(sig.name?esc(sig.name)+'<br>':'')+esc(sig.at?new Date(sig.at).toLocaleString('es-PA'):'Firma confirmada'):'Pendiente de firma'}</div>`}).join('')}</div>`:''}${state.session.user.admin?`<div class="actions">${button('↓ PDF','download',`data-id="${esc(r.id)}" data-format="pdf"`,'small')}${button('↓ CSV','download',`data-id="${esc(r.id)}" data-format="csv"`,'small')}${button('↓ TXT original','download',`data-id="${esc(r.id)}" data-format="txt"`,'small')}${button('↓ PDF nuevos','download',`data-id="${esc(r.id)}" data-format="new-pdf"`,'small')}${state.session.user.admin&&!r.closed&&!r.stale&&r.kind==='final'?(hasBothSignatures(r)?button('Cerrar bodega','close-warehouse',`data-id="${esc(r.id)}"`,'small primary'):button('Firmar','sign',`data-id="${esc(r.id)}"`,'small primary')):''}${state.session.user.admin&&!r.closed&&r.kind==='final'?button('Reabrir conteo','reopen',`data-id="${esc(r.id)}"`,'small danger'):''}</div>`:''}</article>`).join(''):'<p class="small muted">No se han generado reportes. Puedes generar versiones provisionales durante el conteo.</p>'}</div></section>${renderParticipants(w)}</div>`}
+function renderReports(){const w=currentWarehouse();if(!w)return renderWarehouses();const reports=[...(w.reports||[])].sort((a,b)=>b.version-a.version);return header('Reportes, firmas y cierre','Cada firma queda vinculada al contenido y la versión específica del reporte.',(canPrepareReports(w)&&!scopeReadOnly(warehouseScope())?button('Revisión de faltantes','nav','data-page="missing"'):'')+(state.session.user.admin?button('Consolidación','nav','data-page="consolidation"'):'')+(canPrepareReports(w)&&!scopeReadOnly(warehouseScope())?button('Generar provisional','new-report')+button('Solicitar firmas','request-signatures','','primary'):''))+renderCloseReadiness(w)+`<div class="two-col"><section class="card"><h2>Reportes de ${esc(w.name)}</h2><div class="stack">${reports.length?reports.map(r=>`<article class="report"><div class="card-title"><h3>${r.kind==='final'?'Definitivo':'Provisional'} · v${r.version}</h3>${r.closed?'<span class="badge green">Conservado / cerrado</span>':r.stale?'<span class="badge amber">Resultados modificados</span>':statusBadge(r.kind==='final'?'signing':'preparation')}</div><p class="hash">ID ${esc(r.id)}<br>Hash ${esc(r.content_hash)}</p>${r.kind==='final'?`<div class="signature-row">${['performed','reviewed'].map(role=>{const sig=(r.signatures||[]).find(s=>s.role===role);return `<div class="signature-box ${sig?'signed':''}"><strong>${role==='performed'?'Realizado por':'Revisado por'}</strong><br>${sig?(sig.name?esc(sig.name)+'<br>':'')+esc(sig.at?new Date(sig.at).toLocaleString('es-PA'):'Firma confirmada'):'Pendiente de firma'}</div>`}).join('')}</div>`:''}${state.session.user.admin?`<div class="actions">${button('↓ PDF','download',`data-id="${esc(r.id)}" data-format="pdf"`,'small')}${button('↓ CSV','download',`data-id="${esc(r.id)}" data-format="csv"`,'small')}${button('↓ TXT original','download',`data-id="${esc(r.id)}" data-format="txt"`,'small')}${button('↓ PDF nuevos','download',`data-id="${esc(r.id)}" data-format="new-pdf"`,'small')}${state.session.user.admin&&!r.closed&&!r.stale&&r.kind==='final'?(hasBothSignatures(r)?button('Cerrar bodega','close-warehouse',`data-id="${esc(r.id)}"`,'small primary'):button('Firmar','sign',`data-id="${esc(r.id)}"`,'small primary')):''}${state.session.user.admin&&!r.closed&&r.kind==='final'?button('Reabrir conteo','reopen',`data-id="${esc(r.id)}"`,'small danger'):''}</div>`:''}</article>`).join(''):'<p class="small muted">No se han generado reportes. Puedes generar versiones provisionales durante el conteo.</p>'}</div></section>${renderParticipants(w)}</div>`}
 async function renderLogin(){
  const offlineSession=await get('session');
  const activationName=await get('owner_activation_name')||'';
@@ -1669,7 +1690,7 @@ function decimal(input){const s=String(input).trim().replace(',','.');if(!/^\d+(
 async function saveCount(fd){if(!canCount())throw new Error('Primero inicia la participación del dispositivo con conexión.');const quantity=decimal(fd.get('quantity'));const product=state.catalog.find(p=>p.code===state.selected.code&&p.presentation===fd.get('presentation'));if(!product)throw new Error('Selecciona una presentación válida.');const recordId=uid(),now=new Date().toISOString();const operation={id:uid(),kind:fd.get('kind'),period_id:state.period,warehouse:state.warehouse,record_id:recordId,code:product.code,presentation:product.presentation,quantity,zone:String(fd.get('zone')||'').trim(),revision:0,reason:'',created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,token_user:state.session.user.id,status:'pending'};const record={id:recordId,name:product.name,...operation,kind:operation.kind,status:operation.kind==='recount'?'pending':'active',history:[],synced:false,created_at:now,updated_at:now};record.id=recordId;record.revision=1;record.status=operation.kind==='recount'?'pending':'effective';record.local_key=recordKey(record);await saveQueuedOperations([operation],[record]);state.lastZone=operation.zone;await loadQueue();state.records.unshift(record);$('#quantity').value='';$('#quantity').focus();toast('Conteo guardado: '+quantity+' '+product.presentation+(state.online?'':' · pendiente de conexión'));$('#product-results').innerHTML=productResults();if(state.online)sync().catch(()=>{});}
 let syncRun=null;
 function sync(manual=false,force=false){if(syncRun)return syncRun;syncRun=performSync(manual,force).finally(()=>{syncRun=null});return syncRun;}
-function autoRecoverableQueued(op){return ['device_not_active','internal','temporarily_unavailable'].includes(op?.error_code)}
+function autoRecoverableQueued(op){return ['device_not_active','internal','temporarily_unavailable'].includes(op?.error_code)||(op?.error_code==='admin_required'&&op.kind==='count'&&op.only_if_missing===true&&op.zero_confirmed===true)}
 function syncDelay(attempt){return Math.min(120000,2000*Math.pow(2,Math.min(Math.max(0,attempt-1),6)))}
 function isTransientSyncError(error){return error?.retryable===true||error?.code==='internal'||error?.code==='temporarily_unavailable'||[408,425,429].includes(error?.status)||error?.status>=500||error?.code==='network_error'}
 async function keepForRetry(op,error){op.status='pending';op.retry_attempt=(Number(op.retry_attempt)||0)+1;op.next_retry_at=Date.now()+syncDelay(op.retry_attempt);op.retry_reason=error?.code||'temporary';op.error=null;await atomic(['operations'],t=>t.objectStore('operations').put(op));}
@@ -1844,9 +1865,9 @@ const actions={
  'admin-scope':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');await openWarehouse(el.dataset.code,el.dataset.page);},
  'audit':async()=>{requireOnline();const result=await api('/audit');state.audit=result.events||[];state.page='audit';render();},
  'sheet-new':()=>SmartSheet.newArticle(),
- 'sheet-finish':()=>state.session.user.admin?navigate('missing'):finishDevice(),
+ 'sheet-finish':()=>navigate('missing'),
  'missing-zero-batch':()=>confirmMissingBatch(),
- 'missing-count':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');if(!canCount())throw new Error('Reanude el conteo del dispositivo antes de registrar cantidades.');const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');if(el.dataset.zero==='yes'){if(!confirm('¿Verificó físicamente que este artículo no existe?'))return;const scope=warehouseScope();await queueSheetCount(product,'0',{zero_confirmed:true,only_if_missing:true});if(state.online)await sync();if(sameWarehouseScope(scope)&&state.page==='missing')await navigate('missing');}else{state.query=product.code;state.page='count';render();}},
+ 'missing-count':async el=>{requireMissingBatchScope(warehouseScope());const product=state.catalog.find(p=>p.code===el.dataset.code&&p.presentation===el.dataset.presentation);if(!product)throw new Error('Actualice el catálogo.');if(el.dataset.zero==='yes'){if(!confirm('¿Verificó físicamente que este artículo no existe?'))return;const scope=warehouseScope();await queueSheetCount(product,'0',{zero_confirmed:true,only_if_missing:true});if(state.online)await sync();if(sameWarehouseScope(scope)&&state.page==='missing')await navigate('missing');}else{state.query=product.code;state.page='count';render();}},
  'cloud-connect':()=>{if(!cloud)throw new Error('El panel QR solo está disponible en la instalación Pages.');location.href='/conectar-cloud.html'},
  'site-access':()=>{const q=qrcode(0,'M');q.addData(location.origin+location.pathname);q.make();dialog('QR opcional de acceso',`<div class="qr-private"><img alt="Código QR opcional para abrir Inventario Físico" src="${q.createDataURL(8,4)}"><p>Este QR solo abre la aplicación. No concede permisos ni reemplaza la identificación del empleado.</p></div>`,'Cerrar',null)},
  'refresh-catalog':async()=>{requireOnline();if(!await fetchScopeCatalog(warehouseScope()))return;if(state.page==='count')SmartSheet.refresh();toast('Catálogo actualizado: '+state.catalog.length+' presentaciones.');},
