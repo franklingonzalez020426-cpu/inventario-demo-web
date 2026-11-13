@@ -1388,7 +1388,7 @@ function productResults(){const search=state.query.trim().normalize('NFD').repla
 function countForm(){if(!state.selected)return `<div class="empty"><span class="empty-icon">＋</span><h2>Nuevo conteo</h2><p>Selecciona un artículo del catálogo para registrar una cantidad.</p></div>`;const r=state.selected;const presentations=state.catalog.filter(x=>x.code===r.code);return `<div class="eyebrow">Nuevo registro parcial</div><div class="selected-product"><h2>${esc(r.name)}</h2><span class="small muted">Código ${esc(r.code)}</span></div><form id="count-form"><div class="field"><label for="presentation">Presentación</label><select name="presentation" id="presentation">${presentations.map(p=>`<option ${p.presentation===r.presentation?'selected':''} value="${esc(p.presentation)}">${esc(p.presentation)}</option>`).join('')}</select></div><div class="field"><label for="quantity">Cantidad contada</label><input id="quantity" name="quantity" class="quantity" inputmode="decimal" autocomplete="off" placeholder="0,00" required ${!canCount()?'disabled':''}><span class="help">Deja vacío si no has contado. Escribe 0 para confirmar un conteo cero.</span></div><div class="field"><label for="zone">Ubicación / zona <span class="muted">(opcional)</span></label><input name="zone" id="zone" maxlength="120" placeholder="Ej. Barra, nevera, depósito" value="${esc(state.lastZone||'')}"></div><div class="field"><label for="count-kind">Tipo de registro</label><select name="kind" id="count-kind"><option value="count">Conteo parcial · se suma a otros registros</option><option value="recount">Recuento completo · requiere decisión administrativa</option></select></div><div class="form-footer"><button class="button primary" type="submit" ${!canCount()?'disabled':''}>Guardar conteo</button></div><p class="small muted" style="line-height:1.6;margin:15px 0 0">El registro queda protegido después de guardar. Usa «Corregir» para modificar su cantidad.</p></form>`}
 function bindCountSearch(){const el=$('#product-search');if(el)el.addEventListener('input',()=>{state.query=el.value;$('#product-results').innerHTML=productResults()})}
 function effectiveRecords(){return state.records.filter(r=>state.session.user.admin||r.owner_id===state.session.user.id)}
-function renderRecords(){const list=effectiveRecords();return header(state.session.user.admin?'Registros de la bodega':'Mis registros','Las correcciones reemplazan la cantidad efectiva y conservan todas las revisiones.',button('＋ Contar','nav','data-page="count"','primary')+button('Actualizar','reload-records'))+renderQueueIssues()+`<div class="toolbar"><input class="search" type="search" id="record-search" placeholder="Filtrar por artículo, contador o zona…" aria-label="Filtrar registros"></div><div class="stack" id="record-results">${recordsHTML(list)}</div>`}
+function renderRecords(){const list=effectiveRecords();return header(state.session.user.admin?'Registros de la bodega':'Mis registros','Las correcciones reemplazan la cantidad efectiva y conservan todas las revisiones.',button('＋ Contar','nav','data-page="count"','primary')+button('Actualizar','reload-records')+button('Descargar respaldo','download-backup')+button('Restaurar respaldo','restore-backup'))+renderQueueIssues()+`<div class="toolbar"><input class="search" type="search" id="record-search" placeholder="Filtrar por artículo, contador o zona…" aria-label="Filtrar registros"></div><div class="stack" id="record-results">${recordsHTML(list)}</div>`}
 function recordsHTML(list){return list.length?list.map(r=>{const ops=scopePending().filter(o=>o.record_id===r.id);const conflict=ops.some(o=>(o.status==='conflict'||o.status==='error')&&!autoRecoverableQueued(o));const own=r.owner_id===state.session.user.id;return `<article class="record"><div><h3>${esc(r.name||state.catalog.find(p=>p.code===r.code)?.name||r.code)}</h3><p>${esc(r.code)} · ${esc(r.presentation)}${r.zone?' · '+esc(r.zone):''}<br>${esc(r.owner_name)} · revisión ${r.revision||0}${r.kind==='recount'?' · Recuento completo':''}</p><div style="margin-top:9px">${r.archived?'<span class="badge red">Archivado local · no enviado</span>':conflict?'<span class="badge red">Requiere revisión</span>':ops.length||!r.synced?'<span class="badge amber">Guardado en dispositivo</span>':'<span class="badge green">Sincronizado</span>'}${r.status&&!['active','effective'].includes(r.status)?' '+statusBadge(r.status):''}</div></div><div class="record-side"><div class="amount">${esc(r.quantity)}</div><div class="actions">${button('Historial','record-history',`data-id="${esc(r.id)}"`,'small')}${own&&canCount()?button('Corregir','correct',`data-id="${esc(r.id)}"`,'small'):''}</div></div></article>`}).join(''):empty('Todavía no hay registros','Registra tu primer conteo. Los registros guardados estarán disponibles aquí.',button('Ir a conteo','nav','data-page="count"','primary'))}
 function queueNeedsAttention(op){
   return ['conflict','error'].includes(op.status)&&!autoRecoverableQueued(op);
@@ -1404,17 +1404,159 @@ function updateSyncIndicator(){
   const status=$('#sync-status');
   if(status)status.innerHTML=renderSyncStatus();
 }
+const backupFormat = 'mari-conteos-v1';
+const backupEnvironment = () => cloud ? `${cloud.url}/${cloud.functionName}` : location.origin;
+async function backupDigest(data){
+  const hash = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function exportPendingBackup(){
+  const user = state.session.user;
+  const rows = (await all('operations')).filter(op=>!op.resolved&&op.owner_id===user.id).sort(operationOrder);
+  if(!rows.length)throw new Error('Esta cuenta no tiene envíos pendientes para respaldar.');
+  const data = JSON.stringify({environment:backupEnvironment(),owner:user.id,username:user.username||null,device:user.device_id,
+    created:new Date().toISOString(),entries:rows.map(op=>({operation:wireOperation(op),sequence:op.sequence,
+      created:op.created,status:op.status,error_code:op.error_code,error:op.error}))});
+  const blob = new Blob([JSON.stringify({format:backupFormat,sha256:await backupDigest(data),data})],{type:'application/json'});
+  if(blob.size>25_000_000)throw new Error('El respaldo supera 25 MB. Sincronice los envíos disponibles y vuelva a intentarlo.');
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href=url; link.download=`Mari-respaldo-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+  document.body.append(link); link.click(); link.remove(); setTimeout(()=>URL.revokeObjectURL(url),30000);
+  toast(`Respaldo preparado con ${rows.length} envíos. Guarde el archivo fuera de este navegador.`);
+}
+async function readPendingBackup(file){
+  if(!file?.size||file.size>25_000_000)throw new Error('Seleccione un respaldo de Mari de hasta 25 MB.');
+  let envelope;
+  try{envelope=JSON.parse(await file.text());}catch{throw new Error('El archivo no es un respaldo válido de Mari.');}
+  if(envelope?.format!==backupFormat||typeof envelope.data!=='string'||await backupDigest(envelope.data)!==envelope.sha256){
+    throw new Error('El respaldo está dañado o fue modificado. Use el archivo original.');
+  }
+  const data=JSON.parse(envelope.data);
+  if(!data||data.environment!==backupEnvironment()||typeof data.owner!=='string'||typeof data.device!=='string'||!Array.isArray(data.entries)||!data.entries.length){
+    throw new Error('El archivo no corresponde a esta instalación de Mari.');
+  }
+  const ids=new Set();
+  for(const entry of data.entries){
+    const op=entry?.operation;
+    if(!op||!['count','correct','new_article','recount'].includes(op.kind)||
+      !['id','record_id','period_id','warehouse','code','presentation'].every(field=>typeof op[field]==='string'&&op[field].trim())||
+      !Number.isSafeInteger(op.revision)||op.revision<0||typeof op.quantity!=='string'||!/^\d{1,12}(?:\.\d{1,6})?$/.test(op.quantity)||
+      ids.has(op.id)||Object.keys(op).some(field=>!Object.hasOwn(wireOperation(op),field))){
+      throw new Error('El respaldo contiene un envío inválido o repetido.');
+    }
+    ids.add(op.id);
+  }
+  return data;
+}
+async function restoreBackupQueue(data,receipts,user){
+  if(state.session?.user.id!==user.id)throw new Error('La cuenta cambió. Abra el respaldo de nuevo.');
+  const entries=data.entries.filter(entry=>!receipts.has(entry.operation.id)).sort((a,b)=>operationOrder({...a,id:a.operation.id},{...b,id:b.operation.id}));
+  let inserted=0;
+  await new Promise((resolve,reject)=>{
+    const tx=db.transaction(['kv','operations'],'readwrite'), store=tx.objectStore('operations'), kv=tx.objectStore('kv');
+    let problem;
+    tx.oncomplete=resolve;tx.onabort=()=>reject(problem||tx.error||new Error('No se pudo restaurar el respaldo.'));
+    const existing=store.getAll();
+    existing.onsuccess=()=>{
+      const stored=existing.result;
+      const byId=new Map(stored.map(op=>[op.id,op]));
+      for(const {operation} of entries){
+        const local=byId.get(operation.id);
+        if(local&&(local.owner_id!==user.id||JSON.stringify(wireOperation(local))!==JSON.stringify(wireOperation(operation)))){
+          problem=new Error('Un envío del respaldo tiene el mismo identificador que un envío local con datos distintos.');tx.abort();return;
+        }
+      }
+      const occupied=new Set(stored.filter(op=>!op.resolved&&op.owner_id===user.id).map(op=>op.record_id));
+      const conflicts=new Set(entries.filter(({operation})=>!byId.has(operation.id)&&occupied.has(operation.record_id)).map(({operation})=>operation.record_id));
+      if(conflicts.size){problem=new Error('Hay envíos locales distintos para los mismos registros. Descargue un respaldo de esos envíos y revíselos antes de combinar las copias.');tx.abort();return;}
+      const counter=kv.get('operationSequence');
+      counter.onsuccess=()=>{
+        let sequence=Number(counter.result)||0;
+        for(const entry of entries){
+          if(byId.has(entry.operation.id))continue;
+          if(!Number.isSafeInteger(++sequence)){tx.abort();return;}
+          const blocked=['error','conflict'].includes(entry.status);
+          store.add({...entry.operation,sequence,created:typeof entry.created==='string'?entry.created:data.created,
+            owner_id:user.id,owner_name:user.name,device_id:user.device_id,status:blocked?entry.status:'pending',recovery_hold:true,
+            error_code:blocked?entry.error_code:undefined,error:blocked?entry.error:undefined});
+          inserted++;
+        }
+        kv.put(sequence,'operationSequence');
+      };
+    };
+  });
+  return inserted;
+}
+function restorePendingBackup(){
+  requireOnline();
+  const current=state.session.user;
+  dialog('Restaurar respaldo',`<p class="section-caption">Seleccione el archivo de Mari. En otro navegador, confirme la contraseña de la cuenta original. El navegador anterior tendrá que volver a iniciar sesión.</p>
+    <div class="field"><label for="recovery-file">Archivo de respaldo</label><input type="file" id="recovery-file" name="backup" accept=".json,application/json" required></div>
+    <div class="field"><label for="recovery-password">Contraseña de la cuenta original, si cambió de navegador</label><input id="recovery-password" name="secret" type="password" autocomplete="current-password" maxlength="256"></div>`,
+    'Restaurar envíos',async(form,modal)=>{
+      const data=await readPendingBackup(form.get('backup'));
+      if(state.session?.user.id!==current.id)throw new Error('La cuenta cambió. Abra el respaldo de nuevo.');
+      if(data.owner!==current.id){
+        if(!current.username||data.username!==current.username)throw new Error('Abra Mari con la cuenta original del respaldo.');
+        if((await all('operations')).some(op=>!op.resolved&&op.owner_id===current.id))throw new Error('Esta sesión tiene envíos pendientes. Descargue un respaldo y revíselos antes de cambiar a la sesión original.');
+        if(!form.get('secret'))throw new Error('Escriba la contraseña de la cuenta para recuperar la sesión original.');
+        const result=await requestApi('/account/login',{username:current.username,password:form.get('secret'),device_id:data.device,recovery_owner_id:data.owner});
+        if(result.user?.id!==data.owner)throw new Error('El servidor no reconoció al autor original.');
+        await saveNamedSession(result);
+        await put('recovered-device:'+current.username,result.user.device_id);
+        await restoreSession();
+        await refresh(true);
+      }
+      const user=state.session.user;
+      const receipts=new Set();
+      for(let index=0;index<data.entries.length;index+=50){
+        const batch=data.entries.slice(index,index+50).map(entry=>entry.operation);
+        const result=await api('/recovery/receipts',{operations:batch});
+        for(const id of result.receipts)receipts.add(id);
+      }
+      const inserted=await restoreBackupQueue(data,receipts,user);
+      await loadQueue();
+      modal.close();
+      state.page='records';
+      render();
+      toast(`Restaurados para revisión: ${inserted}. Ya confirmados o resueltos por el servidor: ${receipts.size}.`);
+    });
+}
+
+function releaseRestoredOperations(){
+  const owner=state.session.user.id;
+  dialog('Reanudar envíos restaurados','<p class="section-caption">Revise las bodegas y las cantidades del respaldo. Mari reintentará con los identificadores originales y conservará los envíos que sigan en conflicto.</p>',
+    'Reanudar envíos',async(_,modal)=>{
+      requireOnline();
+      if(state.session?.user.id!==owner)throw new Error('La cuenta cambió. Abra la revisión de nuevo.');
+      await atomic(['operations'],tx=>{
+        const cursor=tx.objectStore('operations').openCursor();
+        cursor.onsuccess=()=>{
+          const row=cursor.result;
+          if(!row)return;
+          const op=row.value;
+          if(op.owner_id===owner&&!op.resolved&&op.recovery_hold)row.update({...op,recovery_hold:false});
+          row.continue();
+        };
+      });
+      await loadQueue();
+      modal.close();
+      render();
+      await sync(false,true);
+    });
+}
 function renderQueueIssues(){
-  const list=pending().filter(op=>queueNeedsAttention(op)&&(state.session.user.admin||op.owner_id===state.session.user.id));
+  const list=pending().filter(op=>op.owner_id===state.session.user.id&&(queueNeedsAttention(op)||op.recovery_hold));
   if(!list.length)return '';
-  const admin=state.session.user.admin;
   return `<section class="card queue-issues" aria-label="Envíos que requieren revisión">
     <h2>Envíos que requieren revisión</h2>
+    ${list.some(op=>op.recovery_hold)?button('Reanudar envíos restaurados','release-restored','','primary'):''}
     <div class="stack">${list.map(op=>`<div class="list-detail">
-      <div><strong>${esc(op.code)} · ${esc(op.presentation)}</strong><br><span class="muted small">Bodega ${esc(op.warehouse)} · cantidad ${esc(op.quantity)}${admin&&op.error?' · '+esc(op.error):''}</span></div>
-      ${admin?button('Revisar operación','resolve-op',`data-id="${esc(op.id)}"`,'small'):''}
+      <div><strong>${esc(op.code)} · ${esc(op.presentation)}</strong><br><span class="muted small">Bodega ${esc(op.warehouse)} · cantidad ${esc(op.quantity)}${op.error?' · '+esc(op.error):''}</span></div>
+      ${op.recovery_hold?'<span class="badge amber">Restaurado · pendiente de revisión</span>':button('Revisar operación','resolve-op',`data-id="${esc(op.id)}"`,'small')}
     </div>`).join('')}</div>
-    ${admin?'':'<p class="small muted">Los conteos siguen guardados aquí. Solicita a administración que los revise desde este navegador.</p>'}
+    <p class="small muted">Los envíos siguen guardados en este dispositivo. Descargue un respaldo para conservar una copia.</p>
   </section>`;
 }
 function participantPending(participant){return !participant.finished&&!participant.retired;}
@@ -1712,7 +1854,7 @@ async function renderLogin(){
 function dialog(title,body,submitLabel='Confirmar',submit=null){const m=$('#modal');m.innerHTML=`<form id="dialog-form"><div class="card-title"><h2>${title}</h2><button type="button" class="button ghost small" data-action="modal-close" aria-label="Cerrar ventana">✕</button></div>${body}<div class="dialog-actions">${button('Cancelar','modal-close')}${submit?`<button class="button primary" type="submit">${submitLabel}</button>`:''}</div></form>`;m.showModal();if(submit){$('#dialog-form').onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',m);btn.disabled=true;try{await submit(new FormData(e.target),m)}catch(error){toast(error.message,true)}finally{if(btn.isConnected)btn.disabled=false}}}$('input:not([type=hidden]),select,textarea',m)?.focus();return m;}
 function requireOnline(){if(!state.online||!navigator.onLine)throw new Error('Esta operación necesita conexión con el servidor.');if(state.session.expired)throw new Error('Renueva la sesión para realizar esta operación.');}
 async function adminMutation(path,body,message){requireOnline();const result=await api(path,body);await refresh(true);render();if(message)toast(message);return result;}
-function wireOperation(op){const fields=['name','zero_confirmed','only_if_missing','id','kind','period_id','warehouse','record_id','code','presentation','quantity','zone','revision','reason'];return Object.fromEntries(fields.filter(k=>op[k]!==undefined).map(k=>[k,op[k]]));}
+function wireOperation(op){const fields=['name','zero_confirmed','only_if_missing','id','kind','period_id','warehouse','record_id','code','presentation','quantity','zone','revision','reason','resolves_operations'];return Object.fromEntries(fields.filter(k=>op[k]!==undefined).map(k=>[k,op[k]]));}
 function decimal(input){const s=String(input).trim().replace(',','.');if(!/^\d+(?:\.\d{1,6})?$/.test(s))throw new Error('Introduce una cantidad válida, igual o mayor que cero, con hasta 6 decimales.');const [i,f]=s.split('.');const normalized=i.replace(/^0+(?=\d)/,'');if(normalized.length>12)throw new Error('La cantidad máxima es 999999999999 con hasta 6 decimales.');return normalized+(f?'.'+f:'');}
 async function saveCount(fd){if(!canCount())throw new Error('Primero inicia la participación del dispositivo con conexión.');const quantity=decimal(fd.get('quantity'));const product=state.catalog.find(p=>p.code===state.selected.code&&p.presentation===fd.get('presentation'));if(!product)throw new Error('Selecciona una presentación válida.');const recordId=uid(),now=new Date().toISOString();const operation={id:uid(),kind:fd.get('kind'),period_id:state.period,warehouse:state.warehouse,record_id:recordId,code:product.code,presentation:product.presentation,quantity,zone:String(fd.get('zone')||'').trim(),revision:0,reason:'',created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,token_user:state.session.user.id,status:'pending'};const record={id:recordId,name:product.name,...operation,kind:operation.kind,status:operation.kind==='recount'?'pending':'active',history:[],synced:false,created_at:now,updated_at:now};record.id=recordId;record.revision=1;record.status=operation.kind==='recount'?'pending':'effective';record.local_key=recordKey(record);await saveQueuedOperations([operation],[record]);state.lastZone=operation.zone;await loadQueue();state.records.unshift(record);$('#quantity').value='';$('#quantity').focus();toast('Conteo guardado: '+quantity+' '+product.presentation+(state.online?'':' · pendiente de conexión'));$('#product-results').innerHTML=productResults();if(state.online)sync().catch(()=>{});}
 let syncRun=null;
@@ -1748,7 +1890,7 @@ async function recoverInactiveOperation(op){
 }
 async function performSync(manual=false,force=false){if(!state.online||!navigator.onLine)throw new Error('No hay conexión. Los registros permanecen guardados en este dispositivo.');state.syncing=true;updateSyncIndicator();try{
  await loadQueue();
- const blockedRecords=new Set(pending().filter(o=>['conflict','error'].includes(o.status)&&!autoRecoverableQueued(o)).map(o=>o.record_id));
+ const blockedRecords=new Set(pending().filter(o=>o.recovery_hold||(['conflict','error'].includes(o.status)&&!autoRecoverableQueued(o))).map(o=>o.record_id));
  const now=Date.now();
  const operations=pending().filter(o=>o.owner_id===state.session.user.id&&(!['conflict','error'].includes(o.status)||autoRecoverableQueued(o))&&!blockedRecords.has(o.record_id)&&(force||!o.next_retry_at||Number(o.next_retry_at)<=now)).sort(operationOrder);
  if(!operations.length){if(manual&&state.page==='records')toast(pending().some(o=>['conflict','error'].includes(o.status)&&!autoRecoverableQueued(o))?'Algunos registros necesitan revisión administrativa.':'No hay operaciones pendientes.');return;}
@@ -1798,7 +1940,88 @@ async function performSync(manual=false,force=false){if(!state.online||!navigato
  if(state.online){await refresh(true);if(state.period&&state.warehouse)await loadRecords();}
  }finally{state.syncing=false;await loadQueue();updateSyncIndicator();if(state.page!=='count')render();else SmartSheet.refresh()}}
 async function correction(id){const scope=warehouseScope();const r=state.records.find(x=>x.id===id);if(!r)throw new Error('No se encontró el registro.');if(r.owner_id!==state.session.user.id)throw new Error('Solo el contador original puede corregir este registro.');if(isClosed())throw new Error('La bodega está cerrada.');if(!canCount())throw new Error('Reanuda la participación del dispositivo para corregir. Los reportes definitivos bloquean las correcciones.');if(scopePending().some(o=>o.record_id===id&&['error','conflict'].includes(o.status)&&!autoRecoverableQueued(o)))throw new Error('Este registro requiere revisión administrativa antes de corregirse.');dialog('Corregir registro',`<p class="section-caption">${esc(r.name||r.code)} · ${esc(r.presentation)}<br>Cantidad actual: <strong>${esc(r.quantity)}</strong>. La nueva cantidad reemplaza este valor.</p><div class="field"><label for="correction-quantity">Nueva cantidad</label><input id="correction-quantity" name="quantity" inputmode="decimal" value="${esc(r.quantity)}" required></div><div class="field"><label for="correction-reason">Motivo de la corrección</label><textarea id="correction-reason" name="reason" required minlength="3" maxlength="500" placeholder="Explica por qué cambia la cantidad"></textarea></div>`,'Confirmar corrección',async fd=>{if(!sameWarehouseScope(scope)||!canCount())throw new Error('Vuelva a abrir el registro en la bodega activa.');const quantity=decimal(fd.get('quantity'));const zero_confirmed=Number(quantity)===0;if(zero_confirmed&&!confirm('¿Confirma la cantidad física cero para este registro?'))return;const reason=String(fd.get('reason')).trim();if(reason.length<3)throw new Error('Indica el motivo de la corrección.');const now=new Date().toISOString();const operation={id:uid(),kind:'correct',zero_confirmed,period_id:state.period,warehouse:state.warehouse,record_id:r.id,code:r.code,presentation:r.presentation,quantity,zone:r.zone||'',revision:r.revision||0,reason,created:now,owner_id:state.session.user.id,owner_name:state.session.user.name,device_id:state.session.user.device_id,status:'pending'};const revised={...r,quantity,revision:(r.revision||0)+1,synced:false,updated_at:now,history:[...(r.history||[]),{old_quantity:r.quantity,new_quantity:quantity,reason,at:now,name:state.session.user.name,local:true}]};await saveQueuedOperations([operation],[revised]);if(sameWarehouseScope(scope))state.records=state.records.map(x=>x.id===r.id?revised:x);await loadQueue();$('#modal').close();render();toast('Corrección guardada. Se conserva la cantidad anterior en el historial.');if(state.online)sync().catch(()=>{});});}
-async function resolveOperation(id){const op=state.queue.find(o=>o.id===id);if(!op)return;let server=op.server_record;if(state.online&&op.kind==='correct'){const response=await api('/records?period_id='+op.period_id+'&warehouse='+encodeURIComponent(op.warehouse));server=response.records.find(r=>r.id===op.record_id)||server;}dialog('Revisar operación pendiente',`<p class="section-caption">${esc(op.error)}<br>Artículo ${esc(op.code)} · cantidad local ${esc(op.quantity)}</p>${server?notice('Cantidad actual en el servidor: <strong>'+esc(server.quantity)+'</strong> · revisión '+esc(server.revision)):''}<div class="field"><label for="resolution">Decisión</label><select name="decision" id="resolution"><option value="retry">${op.error_code==='device_not_active'?'Reincorporarme y reintentar esta misma operación':'Reintentar después de comprobar la causa'}</option>${op.kind==='correct'&&server?'<option value="rebase">Aplicar corrección sobre la revisión actual del servidor</option>':''}<option value="archive">Conservar operación en historial local sin reenviarla</option></select></div><div class="field"><label for="resolution-reason">Motivo de la decisión</label><textarea id="resolution-reason" name="reason" minlength="3" required></textarea></div><p class="small muted">Archivar deja constancia local. Las cantidades archivadas no se incorporan al resultado del servidor.</p>`,'Aplicar decisión',async fd=>{const decision=fd.get('decision'),reason=String(fd.get('reason')).trim();if(reason.length<3)throw new Error('Indica un motivo.');const now=new Date().toISOString();if(op.error_code==='device_not_active'&&decision==='retry'){requireOnline();await api('/join',{period_id:op.period_id,warehouse:op.warehouse});state.joined[key(op.period_id,op.warehouse)]=true;await put('joined:'+state.session.user.id,state.joined);const response=await api('/sync',{operations:[wireOperation(op)]});const retried=response.results?.find(item=>item.id===op.id);if(!retried)throw new Error('El servidor no confirmó el reintento; se conserva la operación con el mismo identificador.');if(retried.status==='ok'){await atomic(['operations','records'],t=>{t.objectStore('operations').delete(op.id);if(retried.record){const r={...retried.record,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};r.local_key=recordKey(r);t.objectStore('records').put(r)}});await refresh(true);await loadRecords();await loadQueue();$('#modal').close();render();toast('Conteo sincronizado con el mismo identificador.');return;}op.status=retried.status;op.error=retried.error||'La operación requiere revisión.';op.error_code=retried.code;await atomic(['operations'],t=>t.objectStore('operations').put(op));await loadQueue();throw new Error(op.error);}if(op.error_code==='revision_conflict'){requireOnline();await api('/conflicts/resolve',{operation_id:op.id,reason});}const changes=[];const old={...op,resolved:true,resolution:decision,resolution_reason:reason,resolved_at:now};if(decision==='archive')changes.push(old);else{changes.push(old);const next={...op,id:uid(),created:now,status:'pending',error:null};delete next.sequence;if(op.error_code==='zero_confirmation_required'){if(!confirm('¿Confirma físicamente que la cantidad de este registro es cero?'))return;next.zero_confirmed=true;}if(decision==='rebase'){changes.push(old);next.id=uid();next.revision=server.revision;next.reason=op.reason+' · Resolución: '+reason;next.created=now;delete next.resolved}changes.push(next)}const recordUpdates=[];if(decision==='archive'&&server){const r={...server,period_id:op.period_id,warehouse:op.warehouse,device_id:op.device_id,synced:true};r.local_key=recordKey(r);recordUpdates.push(r);}else if(decision==='archive'){const r=state.records.find(x=>x.id===op.record_id);if(r)recordUpdates.push({...r,archived:true,synced:false});}await saveQueuedOperations(changes,recordUpdates);await loadQueue();await loadRecords();$('#modal').close();render();toast('Decisión guardada.');if(decision!=='archive'&&state.online)sync().catch(()=>{});});}
+async function resolveOperation(id){
+  const user=state.session.user;
+  const queue=(await all('operations')).filter(entry=>!entry.resolved&&entry.owner_id===user.id).sort(operationOrder);
+  const op=queue.find(entry=>entry.id===id&&!entry.recovery_hold);
+  if(!op)throw new Error('El envío ya no está pendiente para esta cuenta.');
+  let server;
+  if(state.online&&op.kind==='correct'&&op.error_code==='revision_conflict'){
+    const query=new URLSearchParams({period_id:op.period_id,warehouse:op.warehouse});
+    const response=await api('/records?'+query);
+    server=response.records.find(record=>record.id===op.record_id&&record.owner_id===user.id);
+  }
+  const canRebase=server&&['effective','pending'].includes(server.status)&&Number.isSafeInteger(Number(server.revision));
+  const corrections=canRebase?queue.filter(entry=>entry.record_id===op.record_id):[];
+  if(corrections.some(entry=>entry.kind!=='correct'||entry.recovery_hold))throw new Error('Revise los otros envíos de este registro antes de aplicar la corrección.');
+  const local=corrections.at(-1)||op;
+  dialog('Revisar envío pendiente',`<p class="section-caption">Bodega ${esc(op.warehouse)} · ${esc(op.code)} · ${esc(op.presentation)}<br>Última cantidad guardada aquí: <strong>${esc(local.quantity)}</strong><br>${esc(op.error||'El servidor aún no confirmó el envío.')}</p>
+    ${server?notice(`Cantidad en el servidor: <strong>${esc(server.quantity)}</strong> · revisión ${esc(server.revision)}`):''}
+    ${canRebase?`<label class="check"><input type="checkbox" name="apply_local" required> Verifiqué que la cantidad local debe sustituir la cantidad mostrada del servidor.</label>
+    <div class="field"><label for="recovery-reason">Motivo</label><textarea id="recovery-reason" name="reason" minlength="3" maxlength="500" required></textarea></div>`:''}
+    <div class="actions">${button('Descargar respaldo','download-backup')}</div>`,canRebase?'Aplicar corrección':'Reintentar el envío',async(form,modal)=>{
+      requireOnline();
+      if(state.session?.user.id!==user.id)throw new Error('La cuenta cambió. Revise el envío de nuevo.');
+      if(syncRun)await syncRun;
+      if(canRebase){
+        if(form.get('apply_local')!=='on')throw new Error('Confirme la cantidad que desea aplicar.');
+        const reason=String(form.get('reason')||'').trim();
+        if(reason.length<3)throw new Error('Indique el motivo de la corrección.');
+        const scope=warehouseScope();
+        if(String(scope.period)!==String(op.period_id)||scope.warehouse!==op.warehouse||!canCount())throw new Error('Abra esta bodega y reanude el conteo para aplicar la corrección.');
+        await stageReviewedCorrection(op,corrections,Number(server.revision),reason,user);
+      }else{
+        const result=await api('/sync',{operations:[wireOperation(op)]});
+        const receipt=result.results?.find(item=>item.id===op.id);
+        if(receipt?.status!=='ok')throw new Error(receipt?.error||'El servidor todavía no confirmó el envío. Puede descargar un respaldo.');
+        await acceptSyncItem(op,receipt);
+      }
+      await loadQueue();
+      modal.close();
+      if(canRebase){
+        await sync(false,true);
+        const remaining=state.queue.some(entry=>entry.owner_id===user.id&&entry.record_id===op.record_id);
+        toast(remaining?'La corrección quedó guardada. Revise los envíos pendientes.':'Corrección sincronizada.');
+      }else{
+        await refresh(true);
+        await loadRecords();
+        render();
+        toast('Envío confirmado con su identificador original.');
+      }
+    });
+}
+function stageReviewedCorrection(op,corrections,revision,reason,user){
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(['kv','operations'],'readwrite');
+    const kv=tx.objectStore('kv'),store=tx.objectStore('operations');
+    let problem;
+    const abort=message=>{problem=new Error(message);tx.abort();};
+    tx.oncomplete=resolve;tx.onabort=()=>reject(problem||tx.error||new Error('No se pudo conservar la corrección.'));
+    const lock=kv.get(`finish-lock:${user.id}:${op.period_id}:${op.warehouse}`);
+    lock.onsuccess=()=>{
+      if(lock.result){abort('Reanude el conteo antes de aplicar la corrección.');return;}
+      const existing=store.getAll();
+      existing.onsuccess=()=>{
+        const queue=existing.result.filter(entry=>!entry.resolved&&entry.owner_id===user.id&&entry.record_id===op.record_id).sort(operationOrder);
+        if(queue.length!==corrections.length||queue.some((entry,index)=>entry.id!==corrections[index].id)){
+          abort('Los envíos de este registro cambiaron. Vuelva a revisar la cantidad local.');return;
+        }
+        const original=queue.at(-1);
+        const conflicts=[...new Set(queue.flatMap(entry=>[...(entry.resolves_operations||[]),...(entry.error_code==='revision_conflict'?[entry.id]:[])]))];
+        const counter=kv.get('operationSequence');
+        counter.onsuccess=()=>{
+          const sequence=(Number(counter.result)||0)+1;
+          if(!Number.isSafeInteger(sequence)){abort('No se pudo asignar el orden de la corrección.');return;}
+          const created=new Date().toISOString();
+          for(const entry of queue)store.put({...entry,resolved:true,resolution:'rebase',resolution_reason:reason,resolved_at:created});
+          store.add({...wireOperation(original),id:uid(),revision,reason,resolves_operations:conflicts,created,sequence,
+            owner_id:user.id,owner_name:user.name,device_id:user.device_id,status:'pending'});
+          kv.put(sequence,'operationSequence');
+        };
+      };
+    };
+  });
+}
 async function importDialog(){if(!state.period)throw new Error('Selecciona primero un período mensual.');requireOnline();state.preview=null;dialog('Actualizar bodega desde XLS',`<p class="section-caption">${esc(periodName())}. Selecciona un archivo por bodega. Puedes volver a importar mientras el período esté abierto; las cantidades físicas, correcciones, firmas e historial se conservan.</p><div class="field"><label for="import-scope">Ámbito de bodega</label><select id="import-scope" name="scope"><option value="">Detectar automáticamente</option><option value="ADCOSA">ADCOSA</option><option value="CLUB">CLUB</option></select><span class="help">Los códigos 210, 300, 320 y 400 están compartidos entre empresas y requieren elegir ADCOSA o CLUB.</span></div><div class="file-drop"><div class="field"><label for="import-files">Archivos XLS</label><input id="import-files" type="file" name="files" accept=".xls" multiple required></div></div><div id="import-preview"></div>`,'Analizar archivos',async(fd,m)=>{const selected=$('#import-files',m).files;if(!selected.length)throw new Error('Selecciona al menos un archivo.');if(Array.from(selected).reduce((total,f)=>total+f.size,0)>20*1024*1024)throw new Error('El lote supera 20 MB. Divide los archivos en varios lotes.');const files=[];for(const f of selected){if(f.size>10*1024*1024)throw new Error('El archivo '+f.name+' supera 10 MB.');files.push({name:f.name,data:await fileBase64(f)})}state.preview=await api('/import/preview',{period_id:state.period,files,scope:fd.get('scope')||''});renderPreview(m);});}
 function fileBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(new Error('No se pudo leer '+file.name));r.readAsDataURL(file)})}
 function renderPreview(m){const p=state.preview;const errorList=(errors)=>errors.map(x=>`<li>${esc(typeof x==='string'?x:JSON.stringify(x))}</li>`).join('');$('#import-preview',m).innerHTML=`<h3>Vista previa del cambio</h3>${p.files.map(f=>`<div class="preview-file"><div class="card-title"><h3>${esc(f.warehouse_code||'Bodega sin identificar')} · ${esc(f.warehouse_name||'')}</h3>${f.duplicate?'<span class="badge amber">Archivo ya aplicado · idempotente</span>':'<span class="badge blue">Analizado</span>'}</div><p class="small muted">${esc(f.name||'')} · ${f.rows_count||0} líneas válidas</p><div class="chip-row"><span class="badge green">${f.new_articles||0} códigos nuevos</span><span class="badge blue">${f.new_combinations||0} presentaciones nuevas</span><span class="badge">${f.changed||0} artículos actualizados</span><span class="badge">${f.unchanged||0} sin cambios</span><span class="badge amber">${f.missing||0} ausentes · quedan para revisión</span></div><p class="small">Existencias teóricas que cambian: ${f.theoretical_changes||0} · Costos que cambian: ${f.cost_changes||0} · Presentaciones por revisar: ${f.presentation_changes||0}</p>${f.missing_examples?.length?`<details><summary>Ver artículos ausentes</summary><ul>${f.missing_examples.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></details>`:''}${f.errors?.length?`<ul style="color:var(--red)">${errorList(f.errors)}</ul>`:''}${f.warnings?.length?`<ul style="color:var(--amber)">${errorList(f.warnings)}</ul>`:''}</div>`).join('')}${p.errors?.length?notice('<ul>'+errorList(p.errors)+'</ul>','red'):''}<p class="small muted">La confirmación actualiza únicamente datos administrativos dentro de una transacción. No modifica conteos físicos ni correcciones. Un cambio de existencia puede reflejar documentos posteriores al conteo y requiere revisar la fecha de corte.</p>`;const form=$('#dialog-form',m);$('.dialog-actions',m).innerHTML=button('Cancelar','modal-close')+`<button class="button primary" type="submit" ${(p.errors?.length||p.files.some(f=>f.errors?.length))?'disabled':''}>Aplicar actualización</button>`;form.onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',m);btn.disabled=true;try{await adminMutation('/import/commit',{preview_id:p.preview_id},'Bodega actualizada; conteos físicos conservados.');m.close();state.page='warehouses';render()}catch(error){toast(error.message,true)}finally{btn.disabled=false}};}
@@ -1919,6 +2142,9 @@ const actions={
  'reload-records':async()=>{await loadRecords();render();toast('Registros actualizados.')},
  correct:el=>correction(el.dataset.id),
   'import-changes':async el=>{if(!state.session.user.admin)throw new Error('Acceso administrativo requerido.');requireOnline();const result=await api('/import/changes?import_id='+encodeURIComponent(el.dataset.id));const x=result.import;dialog('Auditoría de actualización XLS',`<p class="section-caption">${esc(x.warehouse)} · ${esc(x.filename)}<br>${esc(x.administrator)} · ${esc(new Date(x.at).toLocaleString('es-PA'))}<br>SHA-256 ${esc(x.sha256)}</p>${result.changes.length?result.changes.map(c=>`<div class="history-line"><strong>${esc(c.code)} · ${esc(c.presentation)} · ${esc(c.change_kind)}</strong><br><span class="small">Anterior: ${esc(JSON.stringify(c.old_values||{}))}</span><br><span class="small">Nuevo: ${esc(JSON.stringify(c.new_values||{}))}</span><br><span class="muted small">${esc(new Date(c.at).toLocaleString('es-PA'))}</span></div>`).join(''):'<p class="muted small">No hubo cambios de artículos. La importación quedó registrada sin duplicar el catálogo ni los conteos.</p>'}`)},
+ 'download-backup':()=>exportPendingBackup(),
+ 'restore-backup':()=>restorePendingBackup(),
+ 'release-restored':()=>releaseRestoredOperations(),
  'resolve-op':el=>resolveOperation(el.dataset.id),
  'record-history':el=>{const r=state.records.find(x=>x.id===el.dataset.id);dialog('Historial del registro',`<p class="section-caption">${esc(r.name||r.code)} · cantidad efectiva ${esc(r.quantity)} · revisión ${r.revision||0}</p>${r.history?.length?r.history.map(h=>`<div class="history-line"><strong>${esc(h.old_quantity??h.previous_quantity??'Original')} → ${esc(h.new_quantity??h.quantity??'')}</strong><br>${esc(h.reason||'Registro inicial')}<br><span class="muted small">${esc(h.name||h.owner_name||'')} · ${esc(h.at||h.created_at||'')}${h.local?' · guardado local':''}</span></div>`).join(''):'<p class="muted small">Registro original sin correcciones.</p>'}<div class="divider"></div><p class="small muted">Identificador ${esc(r.id)}</p>`)},
  identity:()=>dialog('Tu identificación',`<p class="section-caption">${esc(state.session.user.name)} · ${state.session.user.admin?'Administración':'Contador'}</p>${pending().length?notice('Hay '+pending().length+' operaciones pendientes en este dispositivo. Conserva la identificación actual para sincronizarlas.','amber'):''}<div class="stack">${!state.session.user.admin&&!state.session.user.username&&!state.accountsEnabled?button('Acceso administrativo','elevate','','primary'):''}${button('Cerrar sesión','logout','','danger')}${button('Instalar / añadir a inicio','install')}</div>`),
@@ -1962,7 +2188,9 @@ document.addEventListener('submit',async event=>{
     const fields=new FormData(form);
     const device=await getDeviceId();
     if(fields.has('username')){
-      const result=await requestApi('/account/login',{username:String(fields.get('username')).trim(),password:fields.get('password'),device_id:device});
+      const username=String(fields.get('username')).trim().toLowerCase();
+      const accountDevice=await get('recovered-device:'+username)||device;
+      const result=await requestApi('/account/login',{username,password:fields.get('password'),device_id:accountDevice});
       await saveNamedSession(result);
     }else{
       const role=String(fields.get('role')||'counter');
